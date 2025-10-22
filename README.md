@@ -99,6 +99,209 @@ labelling:
    ```
 3. 결과물은 `output_dir`에 지정한 경로에 생성되며, 증강된 오디오와 `metadata.jsonl` 파일이 포함됩니다.
 
+## 파이프라인 처리 원칙
+- **ID 결정성**: `sample_id = sha1(relative_audio_path + text)`, 증강 후 `aug_id = f"{sample_id}_{hash(augment_events)}`처럼 항상 같은 입력에 동일 식별자를 부여합니다.
+- **시간 단위**: 전 구간에서 초 단위(float)만 사용하며 밀리초 표기는 금지합니다.
+- **샘플레이트/채널 유지**: 기본 16 kHz mono를 유지하고 변경 시 `resample_info` 메타에 기록합니다.
+- **버전/시드 추적**: 모든 산출물에 `tool_version`, `model_name`, `rng_seed`를 포함합니다.
+- **실패 내구성**: 각 레코드에 `status(ok/skip/error)`와 `error_msg`를 남겨 재처리 대상 식별이 용이하도록 합니다.
+
+## 파이프라인 단계별 I/O 계약
+### Step 01 – Alignment (`src/pipeline/step_01_align.py`)
+입력:
+- Zeroth 등 원본 데이터를 전처리한 `raw_samples.jsonl` (또는 HF `Dataset` → 임시 JSONL 변환)
+- WhisperX 정렬 설정(`aligner.model_name`, `device`, `language`, `batch_size`, `vad_backend`, `diarize` 등)
+
+출력(`data/labels/raw_alignment.jsonl`):
+```json
+{
+  "sample_id": "zeroth_train_000123",
+  "audio_path": "data/original/train/000123.wav",
+  "text": "안녕하세요 반갑습니다.",
+  "alignment": {
+    "words": [
+      {"w": "안녕하세요", "start": 0.52, "end": 1.21, "conf": 0.95},
+      {"w": "반갑습니다", "start": 1.82, "end": 2.49, "conf": 0.98}
+    ],
+    "tokens": [
+      {"t": "안", "start": 0.52, "end": 0.62},
+      {"t": "녕", "start": 0.62, "end": 0.69}
+    ],
+    "coverage": {
+      "speech_coverage": 0.86,
+      "aligned_word_ratio": 1.00,
+      "avg_conf": 0.965
+    }
+  },
+  "speech_regions": [
+    {"start": 0.48, "end": 1.25},
+    {"start": 1.78, "end": 2.55}
+  ],
+  "tool_version": {"whisperx": "x.y.z"},
+  "model_name": "large-v3",
+  "rng_seed": 42,
+  "status": "ok",
+  "error_msg": null
+}
+```
+체크포인트:
+- 정렬 실패 시에도 레코드를 남기고 `status="error"`로 표기합니다.
+- 문장부호·공백 정규화 규칙을 사전 정의해 WER/정렬 비교의 일관성을 유지합니다.
+- 30초 이상 긴 오디오는 WhisperX 세그 단위 정렬 후 `segment_boundaries`로 경계를 저장합니다.
+
+### Step 02 – Augmentation (`src/pipeline/step_02_augment.py`)
+입력:
+- `raw_alignment.jsonl`
+- 증강 설정(`insertion_type`, `min_gap_ms`, `insertion_duration_ms`, `crossfade_ms`, `snr_db`, `loudness_target_lufs`, `limit_true_peak_dbfs` 등)
+- 다운로드된 소음 파일(`assets/noises`) 또는 침묵 삽입 옵션
+
+출력:
+- 증강 오디오 `data/augmented_audio/{aug_id}.wav`
+- 증강 메타 `data/labels/augmented_meta.jsonl`
+```json
+{
+  "aug_id": "zeroth_train_000123_abcd12",
+  "sample_id": "zeroth_train_000123",
+  "original_audio_path": "data/original/train/000123.wav",
+  "augmented_audio_path": "data/augmented_audio/zeroth_train_000123_abcd12.wav",
+  "augmentation": {
+    "events": [
+      {
+        "type": "insert_silence",
+        "start_orig": 1.25,
+        "duration": 3.00,
+        "snr_db": null,
+        "crossfade_ms": 50,
+        "noise_src": null
+      }
+    ],
+    "postprocess": {
+      "loudness_target_lufs": -23.0,
+      "true_peak_dbfs": -1.0,
+      "clip_guard_applied": true
+    }
+  },
+  "offset_map": [
+    {"t0_src": 0.00, "t0_dst": 0.00},
+    {"t0_src": 1.25, "t0_dst": 1.25},
+    {"t0_src": 1.25, "t0_dst": 4.25, "delta": 3.00}
+  ],
+  "updated_segments": [
+    {"w": "안녕하세요", "start": 0.52, "end": 1.21},
+    {"w": "반갑습니다", "start": 4.82, "end": 5.49}
+  ],
+  "tool_version": {"ffmpeg": "...", "librosa": "..."},
+  "rng_seed": 4242,
+  "status": "ok",
+  "error_msg": null
+}
+```
+권장 사항:
+- 빠른 경로: `offset_map` 기반으로 기존 정렬을 이동.
+- 정밀 경로(옵션): 증강 오디오를 WhisperX로 재정렬, `updated_segments_refined`에 보존.
+- 증강 전/후 LUFS·True Peak 측정치 기록, 삽입 이벤트 결정은 고정된 RNG 시드로 재현성을 확보합니다.
+
+### Step 03 – Label Build (`src/pipeline/step_03_build_labels.py`)
+입력:
+- `augmented_meta.jsonl`
+- 베이스라인 STT 추론 결과 (또는 모듈 내에서 직접 추론)
+  - 보수적 디코딩: `condition_on_previous_text=False`, `temperature=0`, `beam_size=5–8`
+  - 유도 디코딩: `temperature↑`, `beam_size=1`, `condition_on_previous_text=True`
+- 각 디코딩의 내부 지표(`avg_logprob`, `compression_ratio`, `no_speech_prob`) 저장
+
+출력(`data/labels/metadata.jsonl`):
+```json
+{
+  "aug_id": "zeroth_train_000123_abcd12",
+  "audio_path": "data/augmented_audio/zeroth_train_000123_abcd12.wav",
+  "dpo": {
+    "chosen": {
+      "text": "안녕하세요. <SIL> 반갑습니다.",
+      "decode_params": {"temp": 0.0, "beam": 6, "cond_prev": false},
+      "metrics": {"avg_logprob": -0.12, "compression_ratio": 1.12, "no_speech_prob": 0.03}
+    },
+    "rejected": {
+      "text": "안녕하세요. 감사합니다. 감사합니다. 반갑습니다.",
+      "decode_params": {"temp": 0.8, "beam": 1, "cond_prev": true},
+      "metrics": {"avg_logprob": -1.05, "compression_ratio": 2.85, "no_speech_prob": 0.01}
+    },
+    "mask": {
+      "type": "insert_alignment",
+      "spans": [{"start_tok": 3, "end_tok": 7}],
+      "confidence": 0.91
+    }
+  },
+  "sft": {
+    "target_text": "안녕하세요. <SIL> 반갑습니다.",
+    "silences_meta": [{"start": 1.25, "end": 4.25}],
+    "label_masking": "only_sil",
+    "special_tokens": ["<SIL>"]
+  },
+  "eval": {
+    "reference_text": "안녕하세요. 반갑습니다.",
+    "wer_chosen": 0.00,
+    "wer_rejected": 0.36,
+    "ir_chosen": 0.00,
+    "ir_rejected": 0.28,
+    "dr_chosen": 0.00,
+    "dr_rejected": 0.03,
+    "her_proxy": 0.28
+  },
+  "meta": {
+    "original_audio_path": "data/original/train/000123.wav",
+    "dataset": "zeroth_korean",
+    "split": "train",
+    "augmentation": {
+      "type": "silence",
+      "start_sec": 1.25,
+      "duration_sec": 3.00,
+      "crossfade_ms": 50
+    },
+    "aligner_model": "whisperx-large-v3",
+    "stt_model": "openai/whisper-tiny",
+    "tool_version": {"synth": "0.1.0"},
+    "rng_seed": 4242
+  },
+  "status": "ok",
+  "error_msg": null
+}
+```
+핵심 포인트:
+- Masked-DPO 지원을 위해 `dpo.mask`에 토큰 스팬을 명시합니다.
+- 정답이 있으면 정답 정렬 기반으로 삽입 위치를 계산하고, 없으면 정렬·품질 지표에서 불일치 토큰을 추정합니다.
+- `<SIL>`은 텍스트에 1회만 삽입하고 실제 길이는 `silences_meta`로 관리하여 평가 시 `<SIL>`을 제거한 WER 계산을 지원합니다.
+- 모든 디코딩 파라미터와 지표를 저장해 재현성과 오류 분석을 확보합니다.
+
+## HF 데이터셋 변환 권장 포맷
+- **DPO split**
+  ```json
+  {
+    "audio": {"path": "data/augmented_audio/xxx.wav", "sampling_rate": 16000},
+    "chosen": "...",
+    "rejected": "...",
+    "mask_spans": [[3, 7], [12, 14]],
+    "meta": {...}
+  }
+  ```
+- **SFT split**
+  ```json
+  {
+    "audio": {"path": "...", "sampling_rate": 16000},
+    "text": "... <SIL> ...",
+    "silences_meta": [{"start": 1.25, "end": 4.25}],
+    "masking": "only_sil",
+    "meta": {...}
+  }
+  ```
+
+## 에지 케이스 및 방어 로직
+- 정렬 불안정(`aligned_word_ratio < 0.8`) 시 `status="skip"`으로 마킹합니다.
+- STT 결과의 `compression_ratio > 2.6`이면 환각 가능성으로 플래그하고 라벨 신뢰도를 낮게 기록합니다.
+- `<SIL>`은 연속 삽입을 금지하며 최소 길이(≥0.8–1.0초)를 만족하는 구간만 사용합니다.
+- 삽입 노이즈는 SNR dB 기준으로 스케일링하고 LUFS/True Peak 제한으로 클리핑을 방지합니다.
+- 30초 초과 오디오는 세그먼트 단위로 나눠 증강 후 `offset_map`으로 전체 오프셋을 유지합니다.
+- RNG 시드, 선택된 노이즈 파일, 삽입 위치, 디코딩 파라미터를 모두 메타에 남겨 결정성을 확보합니다.
+
 ## 출력 데이터 스키마
 `output/metadata.jsonl`의 각 라인은 DPO, SFT, 메타정보를 포함한 JSON 구조입니다.
 
@@ -141,10 +344,11 @@ labelling:
 ## 개발 가이드라인
 - **포매터 & 린터**: `black`, `ruff` (또는 `flake8`) 사용.
 - **타입 힌트**: 모든 함수와 주요 변수에 명시적 타입 힌트를 작성.
-- **Docstring**: 모듈, 클래스, 함수에 Google 스타일 Docstring 작성.
-- **로깅**: 표준 출력 대신 `logging` 모듈 사용.
-- **설정 관리**: 모든 하드코딩된 설정값은 YAML 구성으로 이전.
-- **모듈화**: 각 모듈은 단일 책임 원칙(SRP)을 준수.
+  - **Docstring**: 모듈, 클래스, 함수에 Google 스타일 Docstring 작성.
+  - **로깅**: 표준 출력 대신 `logging` 모듈 사용.
+  - **설정 관리**: 모든 하드코딩된 설정값은 YAML 구성으로 이전.
+  - **모듈화**: 각 모듈은 단일 책임 원칙(SRP)을 준수.
+- **검증 리소스**: 자동화 테스트는 `tests/` 폴더에, 실험용 노트북은 `notebooks/`에 배치합니다. `pytest` 도입 후 단계별 I/O 계약을 검증하고 재실행 시 동일 결과가 나오는지 확인하세요.
 
 ## 라이선스
 프로젝트에 적용할 라이선스가 정해지지 않았다면, 사용 목적에 맞는 라이선스를 추가하세요.
