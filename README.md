@@ -91,6 +91,32 @@ labelling:
   - 도시 소리 데이터: <https://www.aihub.or.kr/aihubdata/data/view.do?dataSetSn=585>
   라이선스와 이용 약관을 확인하고 프로젝트 목적에 맞게 사용 경로를 `configs/default_config.yaml`에 지정하세요.
 
+## Noise 데이터 준비 절차
+1. **다운로드**  
+   기본 도시 소리 데이터는 아래 스크립트로 다운로드합니다. 추가 리소스가 필요하면 dataset/resource 키를 인자로 전달하세요.
+   ```bash
+   bash scripts/download_aihub_noises.sh
+   # 예시: bash scripts/download_aihub_noises.sh 585 4C228107-8608-482B-AC25-E2E91F17E122
+   ```
+2. **카탈로그 생성**  
+   라벨 JSON을 순회해 증강에 활용하기 쉬운 CSV 메타를 생성합니다. 결과는 `data/noise_catalog.csv`에 저장됩니다.
+   ```bash
+   python scripts/build_noise_catalog.py --root assets/noises --output data/noise_catalog.csv
+   ```
+   CSV에는 AI Hub 라벨에 포함된 `clip_start_sec`, `clip_end_sec`, `clip_duration_sec`뿐 아니라 카테고리, dB, 원본 경로가 기록됩니다.
+3. **(선택) 리샘플링 캐시 생성**  
+   증강 단계에서 16 kHz mono 오디오를 즉시 사용할 수 있도록 리샘플된 WAV를 준비합니다. NumPy/SciPy 호환 버전에 유의하세요(`pip install --upgrade scipy` 또는 `pip install 'numpy<2'` 필요 시).
+   ```bash
+   python scripts/preprocess_noise_resample.py \
+     --audio-root assets/noises \
+     --target-dir data/noises_resampled \
+     --output data/noise_catalog_resampled.csv \
+     --target-sr 16000 --mono --overwrite
+   ```
+   스크립트는 기존 카탈로그에 `resampled_audio_path`, `resampled_sample_rate_hz`, `resampled_channels`를 추가하며, 실패한 항목은 경고만 남기고 기존 경로를 유지합니다.
+4. **카탈로그 탐색**  
+   `notebooks/noise_catalog_overview.ipynb`를 실행해 카테고리 분포, 길이 히스토그램 등을 확인하고 증강 정책을 설계합니다.
+
 ## 사용 방법
 1. `configs/default_config.yaml`을 프로젝트 환경에 맞게 수정합니다.
 2. 전체 파이프라인을 실행합니다.
