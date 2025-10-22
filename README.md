@@ -13,15 +13,36 @@ Hallucination Data Synthesizer는 OpenAI Whisper 계열과 같은 대규모 자�
 ```text
 hallucination-data-synthesizer/
 ├── README.md
+├── docs/
+│   ├── noise_preparation.md
+│   ├── zeroth_preparation.md
+│   └── alignment_pipeline.md
 ├── requirements.txt
 ├── configs/
 │   └── default_config.yaml
 ├── scripts/
 │   ├── install.sh
-│   └── run_synthesis.sh
+│   ├── datasets/
+│   │   └── export_zeroth_raw_samples.py
+│   ├── noise/
+│   │   ├── download_aihub_noises.sh
+│   │   ├── build_noise_catalog.py
+│   │   └── preprocess_noise_resample.py
+│   └── pipeline/
+│       ├── run_alignment_cpu.sh
+│       └── run_synthesis.sh
 ├── assets/
-│   └── noises/
-│       └── cafe_noise.wav
+│   ├── noises/
+│   └── zeroth/
+├── data/
+│   ├── noise/
+│   │   ├── noise_catalog.csv
+│   │   └── resampled/
+│   ├── zeroth/
+│   │   ├── raw_samples_train.jsonl
+│   │   └── raw_samples_test.jsonl
+│   └── labels/
+│       └── raw_alignment.jsonl
 └── src/
     ├── main.py
     ├── pipeline/
@@ -34,7 +55,8 @@ hallucination-data-synthesizer/
     │   └── whisperx_wrapper.py
     └── utils/
         ├── file_io.py
-        └── logging_config.py
+        ├── logging_config.py
+        └── config_loader.py
 ```
 
 ## 설치
@@ -61,11 +83,20 @@ paths:
   input_audio_dir: "/path/to/your/original/dataset"
   noise_dir: "./assets/noises"
   output_dir: "./output/generated_dataset"
+  noise_catalog: "./data/noise/noise_catalog.csv"
+  noise_resampled_dir: "./data/noise/resampled"
+  raw_samples_path: "./data/zeroth/raw_samples_train.jsonl"
+  alignment_output_path: "./data/labels/raw_alignment.jsonl"
 
 aligner:
   model_name: "large-v3"
   language: "ko"
   device: "cuda"
+  compute_type: "float16"   # CPU 사용 시 "float32" 권장
+  batch_size: 8
+  vad_backend: "none"
+  diarize: false
+  rng_seed: 42
 
 synthesis:
   min_gap_ms: 1000
@@ -93,37 +124,42 @@ labelling:
 
 ## Noise 데이터 준비 절차
 1. **다운로드**  
-   기본 도시 소리 데이터는 아래 스크립트로 다운로드합니다. 추가 리소스가 필요하면 dataset/resource 키를 인자로 전달하세요.
+   `scripts/noise/download_aihub_noises.sh`를 실행해 AI Hub 데이터를 `assets/noises/`에 추출합니다.
    ```bash
-   bash scripts/download_aihub_noises.sh
-   # 예시: bash scripts/download_aihub_noises.sh 585 4C228107-8608-482B-AC25-E2E91F17E122
+   bash scripts/noise/download_aihub_noises.sh
+   # 예시: bash scripts/noise/download_aihub_noises.sh 585 4C228107-8608-482B-AC25-E2E91F17E122
    ```
 2. **카탈로그 생성**  
-   라벨 JSON을 순회해 증강에 활용하기 쉬운 CSV 메타를 생성합니다. 결과는 `data/noise_catalog.csv`에 저장됩니다.
    ```bash
-   python scripts/build_noise_catalog.py --root assets/noises --output data/noise_catalog.csv
+   python scripts/noise/build_noise_catalog.py \
+     --root assets/noises \
+     --output data/noise/noise_catalog.csv
    ```
-   CSV에는 AI Hub 라벨에 포함된 `clip_start_sec`, `clip_end_sec`, `clip_duration_sec`뿐 아니라 카테고리, dB, 원본 경로가 기록됩니다.
 3. **(선택) 리샘플링 캐시 생성**  
-   증강 단계에서 16 kHz mono 오디오를 즉시 사용할 수 있도록 리샘플된 WAV를 준비합니다. NumPy/SciPy 호환 버전에 유의하세요(`pip install --upgrade scipy` 또는 `pip install 'numpy<2'` 필요 시).
    ```bash
-   python scripts/preprocess_noise_resample.py \
-     --audio-root assets/noises \
-     --target-dir data/noises_resampled \
-     --output data/noise_catalog_resampled.csv \
-     --target-sr 16000 --mono --overwrite
+   python scripts/noise/preprocess_noise_resample.py \
+     --catalog data/noise/noise_catalog.csv \
+     --target-dir data/noise/resampled \
+     --output data/noise/noise_catalog_resampled.csv \
+     --target-sr 16000 --mono
    ```
-   스크립트는 기존 카탈로그에 `resampled_audio_path`, `resampled_sample_rate_hz`, `resampled_channels`를 추가하며, 실패한 항목은 경고만 남기고 기존 경로를 유지합니다.
 4. **카탈로그 탐색**  
-   `notebooks/noise_catalog_overview.ipynb`를 실행해 카테고리 분포, 길이 히스토그램 등을 확인하고 증강 정책을 설계합니다.
+   `notebooks/noise_catalog_overview.ipynb`를 열어 카테고리 분포와 길이를 분석합니다.
+
+자세한 단계별 설명은 `docs/noise_preparation.md`를 참고하세요.
+
+## 추가 문서
+- `docs/zeroth_preparation.md`: Zeroth 데이터 추출 및 JSONL 작성 방법
+- `docs/alignment_pipeline.md`: WhisperX 정렬 파이프라인 실행 및 출력 검증
 
 ## 사용 방법
 1. `configs/default_config.yaml`을 프로젝트 환경에 맞게 수정합니다.
-2. 전체 파이프라인을 실행합니다.
+2. 세부 단계는 `docs/` 폴더 문서를 참고해 순차적으로 실행합니다.
+3. 전체 파이프라인을 실행합니다.
    ```bash
-   bash scripts/run_synthesis.sh
+   bash scripts/pipeline/run_synthesis.sh
    ```
-3. 결과물은 `output_dir`에 지정한 경로에 생성되며, 증강된 오디오와 `metadata.jsonl` 파일이 포함됩니다.
+4. 결과물은 `output_dir`에 지정한 경로에 생성되며, 증강된 오디오와 `metadata.jsonl` 파일이 포함됩니다.
 
 ## 파이프라인 처리 원칙
 - **ID 결정성**: `sample_id = sha1(relative_audio_path + text)`, 증강 후 `aug_id = f"{sample_id}_{hash(augment_events)}`처럼 항상 같은 입력에 동일 식별자를 부여합니다.
@@ -135,14 +171,14 @@ labelling:
 ## 파이프라인 단계별 I/O 계약
 ### Step 01 – Alignment (`src/pipeline/step_01_align.py`)
 입력:
-- Zeroth 등 원본 데이터를 전처리한 `raw_samples.jsonl` (또는 HF `Dataset` → 임시 JSONL 변환)
+- Zeroth 등 원본 데이터를 전처리한 `data/zeroth/raw_samples_<split>.jsonl`
 - WhisperX 정렬 설정(`aligner.model_name`, `device`, `language`, `batch_size`, `vad_backend`, `diarize` 등)
 
 출력(`data/labels/raw_alignment.jsonl`):
 ```json
 {
   "sample_id": "zeroth_train_000123",
-  "audio_path": "data/original/train/000123.wav",
+  "audio_path": "assets/zeroth/train/train_000123.wav",
   "text": "안녕하세요 반갑습니다.",
   "alignment": {
     "words": [

@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Tuple
 import librosa
 import numpy as np
 import soundfile as sf
+from tqdm import tqdm
 
 
 LOGGER = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--catalog",
         type=Path,
-        default=Path("data/noise_catalog.csv"),
+        default=Path("data/noise/noise_catalog.csv"),
         help="CSV catalog created by build_noise_catalog.py",
     )
     parser.add_argument(
@@ -35,13 +36,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--target-dir",
         type=Path,
-        default=Path("data/noises_resampled"),
+        default=Path("data/noise/resampled"),
         help="Directory where resampled audio files will be stored.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/noise_catalog_resampled.csv"),
+        default=Path("data/noise/noise_catalog_resampled.csv"),
         help="Output CSV with resampled path metadata.",
     )
     parser.add_argument(
@@ -152,7 +153,7 @@ def update_rows(
     success_count = 0
     failure_count = 0
 
-    for row in rows:
+    for row in tqdm(rows):
         audio_rel = row.get("audio_path")
         row.setdefault("resampled_audio_path", "")
         row.setdefault("resampled_sample_rate_hz", "")

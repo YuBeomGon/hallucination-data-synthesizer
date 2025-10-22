@@ -21,3 +21,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# data asset
+data/
+assets/

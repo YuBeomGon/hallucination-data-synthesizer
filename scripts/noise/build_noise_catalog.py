@@ -57,7 +57,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/noise_catalog.csv"),
+        default=Path("data/noise/noise_catalog.csv"),
         help="Destination CSV file path for the compiled catalog.",
     )
     return parser.parse_args()

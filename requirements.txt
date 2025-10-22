@@ -5,8 +5,9 @@ librosa
 soundfile
 datasets
 numpy
+pandas
 pydub
+PyYAML
+scipy
 torchaudio
 pytest
-pandas
-scipy

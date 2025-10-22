@@ -42,7 +42,7 @@ pushd "$TARGET_DIR" >/dev/null
 
 for resource_id in "${RESOURCE_IDS[@]}"; do
     echo "[dataset:$DATASET_KEY resource:$resource_id] Downloading with aihubshell..."
-    aihubshell -mode d -datasetkey "$DATASET_KEY" -aihubapikey "$resource_id"
+    aihubshell -mode d -datasetkey "$DATASET_KEY" -resourcekey "$resource_id"
 done
 
 echo "Scanning for ZIP archives to extract..."

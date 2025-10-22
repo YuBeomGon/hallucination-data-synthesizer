@@ -4,11 +4,21 @@ paths:
   output_dir: "./data/augmented_audio"
   label_dir: "./data/labels"
   hf_dataset_dir: "./data/hf_dataset"
+  noise_catalog: "./data/noise/noise_catalog.csv"
+  noise_resampled_dir: "./data/noise/resampled"
+  raw_samples_path: "./data/zeroth/raw_samples_train.jsonl"
+  alignment_output_path: "./data/labels/raw_alignment.jsonl"
 
 aligner:
   model_name: "large-v3"
   language: "ko"
   device: "cuda"
+  compute_type: "float16"
+  # When using CPU, float32 is recommended; adjust automatically in code.
+  batch_size: 8
+  vad_backend: "none"
+  diarize: false
+  rng_seed: 42
 
 synthesis:
   min_gap_ms: 1000
