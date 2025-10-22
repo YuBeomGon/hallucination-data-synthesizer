@@ -77,6 +77,20 @@ labelling:
   baseline_model_name: "openai/whisper-large-v3"
 ```
 
+## POC 데이터 자원
+- **음성(Prompt) 데이터**: Hugging Face의 `Bingsu/zeroth-korean`을 활용해 초기 실험을 진행할 수 있습니다. `datasets` 라이브러리로 바로 로드할 수 있으며, `audio`, `text` 필드를 포함합니다.
+  ```python
+  from datasets import load_dataset
+
+  dataset = load_dataset("Bingsu/zeroth-korean")
+  first_sample = dataset["train"][0]
+  ```
+  데이터셋은 16 kHz 샘플링 레이트의 음성과 한국어 전사를 제공합니다.
+- **소음(Augmentation) 데이터**: AI Hub에서 배포하는 아래 두 가지 소음 데이터셋을 사용해 침묵/소음 삽입 효과를 테스트할 수 있습니다.
+  - 극한 소음 환경 소리 데이터: <https://www.aihub.or.kr/aihubdata/data/view.do?dataSetSn=71376>
+  - 도시 소리 데이터: <https://www.aihub.or.kr/aihubdata/data/view.do?dataSetSn=585>
+  라이선스와 이용 약관을 확인하고 프로젝트 목적에 맞게 사용 경로를 `configs/default_config.yaml`에 지정하세요.
+
 ## 사용 방법
 1. `configs/default_config.yaml`을 프로젝트 환경에 맞게 수정합니다.
 2. 전체 파이프라인을 실행합니다.
