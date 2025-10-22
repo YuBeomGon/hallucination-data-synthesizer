@@ -1,0 +1,25 @@
+paths:
+  input_audio_dir: "./assets/zeroth"
+  noise_dir: "./assets/noises"
+  output_dir: "./data/augmented_audio"
+  label_dir: "./data/labels"
+  hf_dataset_dir: "./data/hf_dataset"
+
+aligner:
+  model_name: "large-v3"
+  language: "ko"
+  device: "cuda"
+
+synthesis:
+  min_gap_ms: 1000
+  insertion_duration_ms: 3000
+  insertion_type: "noise"
+  crossfade_ms: 50
+
+labelling:
+  baseline_model_name: "openai/whisper-large-v3"
+  include_silence_token: true
+
+metadata:
+  enable_tracking: true
+  save_original_segments: true

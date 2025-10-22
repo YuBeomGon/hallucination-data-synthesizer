@@ -1,0 +1,12 @@
+# Core dependencies for Hallucination Data Synthesizer
+# Pin exact versions once the stack stabilizes
+whisperx
+librosa
+soundfile
+datasets
+numpy
+pydub
+torchaudio
+pytest
+pandas
+scipy
