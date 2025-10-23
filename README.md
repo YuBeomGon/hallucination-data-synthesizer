@@ -28,7 +28,7 @@ hallucination-data-synthesizer/
 │   └── zeroth_v2/                # 화자 ID가 포함된 신규 Zeroth 세트
 ├── data/
 │   ├── noise/                    # 노이즈 카탈로그 & 리샘플 캐시
-│   ├── zeroth_v2/                # raw_samples, pair 목록 등 신규 메타
+│   ├── zeroth_v2/                # raw_samples 등 신규 메타
 │   ├── labels_v2/                # 정렬/증강/레이블 결과(JSONL)
 │   └── augmented_audio_v2/       # 합성 WAV
 ├── scripts/
@@ -105,55 +105,37 @@ python scripts/noise/preprocess_noise_resample.py \
   "index": 123
 }
 ```
-기존 `scripts/datasets/export_zeroth_raw_samples.py`를 확장하거나 별도 스크립트를 작성해 `speaker_id`를 포함하도록 변환하세요.
-
-### 3. 발화 페어 매니페스트
-두 발화를 결합하기 위해 `data/zeroth_v2/pairs_<split>.jsonl`을 준비합니다. 권장 스키마는 다음과 같습니다.
-```json
-{
-  "pair_id": "spk_045_000123_000456",
-  "speaker_id": "spk_045",
-  "split": "train",
-  "utterances": [
-    {"sample_id": "zeroth_v2_train_000123"},
-    {"sample_id": "zeroth_v2_train_000456"}
-  ],
-  "gap_sec": 2.4,
-  "notes": {"strategy": "sequential"}
-}
-```
-페어 구성 시 길이, 발화 순서, 텍스트 품질 등을 기준으로 필터링하여 노이즈 삽입에 적합한 조합만 남기세요.
+- 새 추출 스크립트:
+  ```bash
+  python scripts/datasets/export_zeroth_v2.py \
+    --dataset kresnik/zeroth_korean \
+    --audio-dir assets/zeroth_v2 \
+    --raw-samples-dir data/zeroth_v2
+  ```
+  `--limit` 옵션으로 빠른 샘플 추출을 테스트한 후 전체 데이터를 변환하세요.
 
 ## 파이프라인 단계
 
-### Step 01 – Alignment (`src/pipeline/step_01_align.py`)
-- 입력: `data/zeroth_v2/raw_samples_<split>.jsonl`
-- 출력: `data/labels_v2/<split>/raw_alignment.jsonl`
-- 역할: 각 발화에 대해 WhisperX CTC 정렬을 실행해 단어/토큰 타임스탬프를 계산합니다.
-- 체크포인트: `status` 필드가 `ok`인지 확인하고, 실패 레코드는 추후 페어링에서 제외합니다.
+## 파이프라인 단계
 
-### Step 02 – Two-Utterance Augmentation (`src/pipeline/step_02_augment.py`)
-- 입력:
-  - Step 01 정렬 결과
-  - 발화 페어 목록(`pairs_<split>.jsonl`)
-  - 노이즈 카탈로그 & WAV
+### Step 01 – Two-Utterance Synthesis (신규)
+- 입력: `data/zeroth_v2/raw_samples_<split>.jsonl`, 노이즈 카탈로그 & WAV
 - 처리:
-  - 동일 화자 발화 A/B를 불러와 이어 붙일 경계 위치를 계산합니다.
-  - `gap_sec` 또는 설정값을 기준으로 중간 구간을 생성하고 노이즈 샘플을 삽입합니다.
-  - crossfade, SNR, LUFS, True Peak를 조정해 자연스러운 전이 구간을 만듭니다.
-  - 오프셋 맵을 작성해 발화 B 이후 단어 타임스탬프를 재조정합니다.
+  - 동일 화자 발화를 길이 제한(<40초 등) 안에서 랜덤 샘플링하고, 필요 시 `time_stretch` 비율을 적용합니다.
+  - 발화 A → 전이 노이즈 → 발화 B 순서로 결합하고, pydub 기반 crossfade/smoothing, LUFS/True Peak 보정을 수행합니다.
+  - 노이즈 소스·슬라이스 위치·전이 시작/종료 시점·결합 후 총 길이·사용한 RNG 시드를 메타데이터로 기록합니다.
 - 출력:
   - WAV: `data/augmented_audio_v2/<split>/<pair_id>.wav`
-  - 메타: `data/labels_v2/<split>/augmented_meta.jsonl`
-    - `pair_id`, `speaker_id`, `source_samples`, `augmentation.events`, `offset_map`, `status`
-- 실패 시: `status` 값을 `pair_not_found`, `insufficient_gap`, `noise_unavailable` 등으로 남겨 재처리에 활용합니다.
+  - 메타: `data/labels_v2/<split>/paired_meta.jsonl`
+    - `pair_id`, `speaker_id`, `source_samples`, `transition`, `noise`, `timings`(utterance A, noise, utterance B), `combined_text`, `status`, `error_msg`
+- 실패 시: 길이 초과, 노이즈 미존재 등 사유를 기록하고 `status`를 `skip`/`error`로 설정합니다.
 
-### Step 03 – Label Build (`src/pipeline/step_03_build_labels.py`)
-- 입력: 증강 메타, 베이스라인 STT 모델 추론 결과(또는 모듈 내 추론)
+### Step 02 – Label Build (`src/pipeline/step_03_build_labels.py`, 확장 예정)
+- 입력: Step 01 산출물(WAV + paired_meta), 베이스라인 STT 모델 추론 결과(또는 모듈 내 추론)
 - 처리:
   - 보수적/유도 디코딩을 수행해 chosen/rejected 텍스트를 구성합니다.
-  - `<SIL_TRANS>` 또는 `<NOISE_TRANS>` 토큰으로 전이 구간을 명시한 SFT 타깃을 생성합니다.
-  - WER, hallucination proxy 등 지표를 계산하고 `status` 및 오류 메시지를 기록합니다.
+  - Step 01에서 기록한 전이 구간을 활용하여 `<SIL_TRANS>` 등 전용 토큰을 삽입한 SFT 타깃을 생성합니다.
+  - WER, 환각 지표 등을 계산하고 메타정보와 함께 저장합니다.
 - 출력: `data/labels_v2/<split>/metadata.jsonl`
 
 ## 설정 가이드 (`configs/two_utterances.yaml`)
@@ -161,57 +143,57 @@ python scripts/noise/preprocess_noise_resample.py \
 ```yaml
 paths:
   input_audio_dir: "./assets/zeroth_v2"
-  pair_manifest: "./data/zeroth_v2/pairs_train.jsonl"
-  raw_samples_path: "./data/zeroth_v2/raw_samples_train.jsonl"
-  alignment_output_dir: "./data/labels_v2"
-  augmented_audio_dir: "./data/augmented_audio_v2"
   noise_dir: "./assets/noises"
+  augmented_audio_dir: "./data/augmented_audio_v2"
+  metadata_dir: "./data/labels_v2"
+  raw_samples_template: "./data/zeroth_v2/raw_samples_{split}.jsonl"
   noise_catalog: "./data/noise/noise_catalog.csv"
   noise_resampled_dir: "./data/noise/resampled"
 
-aligner:
-  model_name: "large-v3"
-  align_model_name: "kresnik/wav2vec2-large-xlsr-korean"
-  language: "ko"
-  device: "cuda"
-  rng_seed: 42
-
-pairing:
+selection:
   min_utterance_sec: 1.5
   max_utterance_sec: 15.0
+  max_total_duration_sec: 40.0
   max_length_ratio: 3.0
   allow_cross_split: false
+  rng_seed: 777
 
 synthesis:
-  mode: "two_utterances"
-  transition_gap_sec:
-    default: 2.5
-    jitter: 0.5
-  crossfade_sec: 0.08
+  crossfade_sec: 0.1
   target_snr_db: 10.0
   loudness_target_lufs: -23.0
   true_peak_dbfs: -1.0
-  rng_seed: 9876
+  transition:
+    min_noise_sec: 1.0
+    max_noise_sec: 2.5
+    min_pause_sec: 0.3
+    max_pause_sec: 1.0
+    allow_silence_prob: 0.2
+  time_stretch:
+    enable: false
+    min_ratio: 0.95
+    max_ratio: 1.05
   noise_categories: []
 
 labelling:
   baseline_model_name: "openai/whisper-large-v3"
   transition_token: "<SIL_TRANS>"
+  include_silence_token: true
+  max_response_sec: 45.0
 ```
-필요 시 Step 02/03 코드에서 새 필드를 읽어 처리하도록 구현하세요.
+필요 시 Step 01/02 구현에서 위 필드를 참조해 샘플링·전이·라벨 생성 로직을 제어하세요.
 
 ## 산출물 구조
 - `data/augmented_audio_v2/<split>/<pair_id>.wav`: 16 kHz mono 결합 오디오
-- `data/labels_v2/<split>/raw_alignment.jsonl`: 단일 발화 정렬 결과
-- `data/labels_v2/<split>/augmented_meta.jsonl`: 증강 이벤트 및 오프셋 맵
-- `data/labels_v2/<split>/metadata.jsonl`: DPO/SFT 레이블(transition 토큰 포함)
+- `data/labels_v2/<split>/paired_meta.jsonl`: 결합에 사용된 발화/노이즈/전이 구간 메타데이터
+- `data/labels_v2/<split>/metadata.jsonl`: DPO/SFT 라벨 및 품질 지표
 
-각 JSON 레코드는 `pair_id`, `status`, `error_msg`, `tool_version`, `rng_seed`를 포함해 재현성을 보장해야 합니다.
+각 JSON 레코드는 `pair_id`, `status`, `error_msg`, `tool_version`, `rng_seed` 등을 포함해 재현성을 보장해야 합니다.
 
 ## QA 및 검증 팁
-- 페어 매니페스트에서 `speaker_id`가 일치하는지 사전 검증하세요.
-- `augmented_meta.jsonl`을 `jq`로 필터링해 실패 원인을 점검하고, 무작위 샘플의 오디오/스펙트로그램을 청취해 전이 구간 품질을 확인합니다.
-- 라벨 빌드 후 chosen/rejected 텍스트에서 전이 토큰이 올바르게 사용되었는지 검토하세요.
+- Step 01에서 기록한 `timings`가 실 오디오 길이와 일치하는지 확인하고, 길이 제한(예: 40초)을 넘는 경우 적절히 `skip` 처리됐는지 검토하세요.
+- `paired_meta.jsonl`을 `jq`로 필터링해 전이 구간의 노이즈 길이·SNR 분포를 점검하고, 무작위 샘플을 청취해 crossfade 품질을 확인합니다.
+- Step 02 결과에서 `<SIL_TRANS>` 등 전이 토큰이 기대 위치에 들어갔는지, chosen/rejected 텍스트가 음성 내용과 일관하는지 확인하세요.
 
 ## 개발 가이드라인
 - 코드 포맷터는 `black`, 린터는 `ruff`(또는 `flake8`)을 사용합니다.

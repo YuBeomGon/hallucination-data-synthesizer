@@ -1,56 +1,46 @@
 paths:
   input_audio_dir: "./assets/zeroth_v2"
   noise_dir: "./assets/noises"
-  output_dir: "./data/augmented_audio_v2"
-  label_dir: "./data/labels_v2"
-  hf_dataset_dir: "./data/hf_dataset_v2"
+  augmented_audio_dir: "./data/augmented_audio_v2"
+  metadata_dir: "./data/labels_v2"
+  raw_samples_template: "./data/zeroth_v2/raw_samples_{split}.jsonl"
   noise_catalog: "./data/noise/noise_catalog.csv"
   noise_resampled_dir: "./data/noise/resampled"
-  raw_samples_path: "./data/zeroth_v2/raw_samples_train.jsonl"
-  alignment_output_dir: "./data/labels_v2"
-  pair_manifest: "./data/zeroth_v2/pairs_train.jsonl"
+  hf_dataset_dir: "./data/hf_dataset_v2"
 
-aligner:
-  model_name: "large-v3"
-  language: "ko"
-  device: "cuda"
-  align_model_name: "kresnik/wav2vec2-large-xlsr-korean"
-  compute_type: "float16"
-  batch_size: 8
-  vad_backend: "none"
-  diarize: false
-  rng_seed: 42
-
-pairing:
+selection:
   min_utterance_sec: 1.5
   max_utterance_sec: 15.0
+  max_total_duration_sec: 40.0
   max_length_ratio: 3.0
   allow_cross_split: false
-  max_pause_gap_sec: 5.0
+  rng_seed: 777
 
 synthesis:
   mode: "two_utterances"
-  min_gap_sec: 0.5
-  insertion_duration_sec:
-    min: 1.0
-    max: 2.5
-  transition_gap_sec:
-    default: 2.5
-    jitter: 0.5
-  crossfade_sec: 0.08
-  context_window_sec: 0.75
+  crossfade_sec: 0.1
   target_snr_db: 10.0
   loudness_target_lufs: -23.0
   true_peak_dbfs: -1.0
-  insertions_per_file: 1
-  rng_seed: 9876
+  transition:
+    min_noise_sec: 1.0
+    max_noise_sec: 2.5
+    min_pause_sec: 0.3
+    max_pause_sec: 1.0
+    allow_silence_prob: 0.2
+  time_stretch:
+    enable: false
+    min_ratio: 0.95
+    max_ratio: 1.05
   noise_categories: []
 
 labelling:
   baseline_model_name: "openai/whisper-large-v3"
   transition_token: "<SIL_TRANS>"
   include_silence_token: true
+  max_response_sec: 45.0
 
 metadata:
   enable_tracking: true
-  save_original_segments: true
+  save_source_text: true
+  save_transition_stats: true
