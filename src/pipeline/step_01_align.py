@@ -40,21 +40,44 @@ class RawSample:
 class TranscriptAligner:
     """Align fixed transcripts to audio using WhisperX CTC alignment."""
 
-    def __init__(self, model_name: str, device: str, language: Optional[str]) -> None:
-        self.model_name = model_name
+    def __init__(
+        self,
+        tokenizer_model_name: str,
+        align_model_name: Optional[str],
+        device: str,
+        language: Optional[str],
+    ) -> None:
+        self.model_name = tokenizer_model_name
         self.device = device
         self.language = language or "en"
-        LOGGER.info("Loading tokenizer for %s (%s)", model_name, self.language)
-        multilingual = not model_name.endswith(".en")
+        LOGGER.info("Loading tokenizer for %s (%s)", tokenizer_model_name, self.language)
+        multilingual = not tokenizer_model_name.endswith(".en")
         self.tokenizer = whisper.tokenizer.get_tokenizer(
             multilingual=multilingual,
             language=self.language,
         )
-        LOGGER.info("Loading align model (%s, %s)", self.language, device)
-        self.align_model, self.metadata = whisperx.load_align_model(
-            language_code=self.language,
-            device=device,
-        )
+
+        if align_model_name:
+            LOGGER.info(
+                "Loading align model %s on %s",
+                align_model_name,
+                device,
+            )
+            self.align_model, self.metadata = whisperx.load_align_model(
+                model_name=align_model_name,
+                language_code=self.language,
+                device=device,
+            )
+        else:
+            LOGGER.info(
+                "Loading default align model for language %s on %s",
+                self.language,
+                device,
+            )
+            self.align_model, self.metadata = whisperx.load_align_model(
+                language_code=self.language,
+                device=device,
+            )
         self.version = getattr(whisperx, "__version__", "unknown")
 
     def align(self, audio_path: Path, text: str) -> Dict[str, Any]:
@@ -235,7 +258,8 @@ def run_alignment(config: Dict[str, Any], args: argparse.Namespace) -> None:
     audio_root = Path(paths.get("input_audio_dir", ".")).resolve()
 
     aligner = TranscriptAligner(
-        model_name=aligner_cfg.get("model_name", "large-v3"),
+        tokenizer_model_name=aligner_cfg.get("model_name", "large-v3"),
+        align_model_name=aligner_cfg.get("align_model_name"),
         device=aligner_cfg.get("device", "cuda"),
         language=aligner_cfg.get("language"),
     )

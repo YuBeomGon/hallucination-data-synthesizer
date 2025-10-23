@@ -18,6 +18,7 @@ aligner:
   model_name: "large-v3"
   language: "ko"
   device: "cuda"        # GPU 없으면 "cpu"
+  align_model_name: "kresnik/wav2vec2-large-xlsr-korean"
   rng_seed: 42
 ```
 
