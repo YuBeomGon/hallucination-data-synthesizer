@@ -7,7 +7,7 @@ paths:
   noise_catalog: "./data/noise/noise_catalog.csv"
   noise_resampled_dir: "./data/noise/resampled"
   raw_samples_path: "./data/zeroth/raw_samples_train.jsonl"
-  alignment_output_path: "./data/labels/raw_alignment.jsonl"
+  alignment_output_dir: "./data/labels"
 
 aligner:
   model_name: "large-v3"

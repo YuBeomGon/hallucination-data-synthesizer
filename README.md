@@ -35,14 +35,19 @@ hallucination-data-synthesizer/
 │   ├── noises/
 │   └── zeroth/
 ├── data/
+│   ├── augmented_audio/
+│   │   ├── train/
+│   │   └── test/
+│   ├── labels/
+│   │   ├── train/
+│   │   │   └── raw_alignment.jsonl
+│   │   └── test/
 │   ├── noise/
 │   │   ├── noise_catalog.csv
 │   │   └── resampled/
-│   ├── zeroth/
-│   │   ├── raw_samples_train.jsonl
-│   │   └── raw_samples_test.jsonl
-│   └── labels/
-│       └── raw_alignment.jsonl
+│   └── zeroth/
+│       ├── raw_samples_train.jsonl
+│       └── raw_samples_test.jsonl
 └── src/
     ├── main.py
     ├── pipeline/
@@ -86,7 +91,7 @@ paths:
   noise_catalog: "./data/noise/noise_catalog.csv"
   noise_resampled_dir: "./data/noise/resampled"
   raw_samples_path: "./data/zeroth/raw_samples_train.jsonl"
-  alignment_output_path: "./data/labels/raw_alignment.jsonl"
+  alignment_output_dir: "./data/labels"
 
 aligner:
   model_name: "large-v3"
@@ -174,7 +179,7 @@ labelling:
 - Zeroth 등 원본 데이터를 전처리한 `data/zeroth/raw_samples_<split>.jsonl`
 - WhisperX 정렬 설정(`aligner.model_name`, `device`, `language`, `batch_size`, `vad_backend`, `diarize` 등)
 
-출력(`data/labels/raw_alignment.jsonl`):
+출력(`data/labels/<split>/raw_alignment.jsonl`):
 ```json
 {
   "sample_id": "zeroth_train_000123",
@@ -213,19 +218,19 @@ labelling:
 
 ### Step 02 – Augmentation (`src/pipeline/step_02_augment.py`)
 입력:
-- `raw_alignment.jsonl`
+- `data/labels/<split>/raw_alignment.jsonl`
 - 증강 설정(`insertion_type`, `min_gap_ms`, `insertion_duration_ms`, `crossfade_ms`, `snr_db`, `loudness_target_lufs`, `limit_true_peak_dbfs` 등)
 - 다운로드된 소음 파일(`assets/noises`) 또는 침묵 삽입 옵션
 
 출력:
-- 증강 오디오 `data/augmented_audio/{aug_id}.wav`
-- 증강 메타 `data/labels/augmented_meta.jsonl`
+- 증강 오디오 `data/augmented_audio/<split>/{aug_id}.wav`
+- 증강 메타 `data/labels/<split>/augmented_meta.jsonl`
 ```json
 {
   "aug_id": "zeroth_train_000123_abcd12",
   "sample_id": "zeroth_train_000123",
-  "original_audio_path": "data/original/train/000123.wav",
-  "augmented_audio_path": "data/augmented_audio/zeroth_train_000123_abcd12.wav",
+  "original_audio_path": "assets/zeroth/train/train_000123.wav",
+  "augmented_audio_path": "data/augmented_audio/train/zeroth_train_000123_abcd12.wav",
   "augmentation": {
     "events": [
       {

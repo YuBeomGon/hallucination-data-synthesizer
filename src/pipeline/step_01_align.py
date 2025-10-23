@@ -275,8 +275,16 @@ def run_alignment(config: Dict[str, Any], args: argparse.Namespace) -> None:
     paths = config.get("paths", {})
     aligner_cfg = config.get("aligner", {})
 
-    raw_samples_path = args.raw_samples or Path(paths.get("raw_samples_path", "data/raw_samples.jsonl"))
-    output_path = args.out or Path(paths.get("alignment_output_path", "data/labels/raw_alignment.jsonl"))
+    raw_samples_path = Path(args.raw_samples) if args.raw_samples else Path(paths.get("raw_samples_path", "data/raw_samples.jsonl"))
+
+    if args.out:
+        output_path = Path(args.out)
+    else:
+        output_base = Path(paths.get("alignment_output_dir", paths.get("label_dir", "data/labels")))
+        if args.split:
+            output_path = output_base / args.split / "raw_alignment.jsonl"
+        else:
+            output_path = output_base / "raw_alignment.jsonl"
     audio_root = Path(paths.get("input_audio_dir", ".")).resolve()
 
     wrapper = WhisperXWrapper(

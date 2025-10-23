@@ -132,8 +132,6 @@ def test_run_alignment_writes_expected_output(tmp_path, monkeypatch):
     config: Dict[str, Any] = {
         "paths": {
             "input_audio_dir": str(audio_dir),
-            "raw_samples_path": str(raw_samples),
-            "alignment_output_path": str(output_path),
         },
         "aligner": {
             "language": "ko",
@@ -147,7 +145,12 @@ def test_run_alignment_writes_expected_output(tmp_path, monkeypatch):
         },
     }
 
-    args = SimpleNamespace(raw_samples=None, out=None, split="train", limit=None)
+    args = SimpleNamespace(
+        raw_samples=str(raw_samples),
+        out=str(output_path),
+        split="train",
+        limit=None,
+    )
     step_01_align.run_alignment(config, args)
 
     records = list(_read_jsonl(output_path))
@@ -191,13 +194,16 @@ def test_run_alignment_respects_limit(tmp_path, monkeypatch):
     config: Dict[str, Any] = {
         "paths": {
             "input_audio_dir": str(audio_dir),
-            "raw_samples_path": str(raw_samples),
-            "alignment_output_path": str(output_path),
         },
         "aligner": {},
     }
 
-    args = SimpleNamespace(raw_samples=None, out=None, split="train", limit=2)
+    args = SimpleNamespace(
+        raw_samples=str(raw_samples),
+        out=str(output_path),
+        split="train",
+        limit=2,
+    )
     step_01_align.run_alignment(config, args)
 
     records = list(_read_jsonl(output_path))

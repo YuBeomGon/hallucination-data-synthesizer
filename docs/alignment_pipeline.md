@@ -1,18 +1,18 @@
 # Alignment Pipeline (Step 01)
 
-WhisperX로 Zeroth 오디오와 텍스트를 정렬해 `data/labels/raw_alignment.jsonl`을 생성하는 절차입니다.
+WhisperX로 Zeroth 오디오와 텍스트를 정렬해 `data/labels/<split>/raw_alignment.jsonl`을 생성하는 절차입니다.
 
 ## 입력/출력 경로
 - 입력 오디오: `assets/zeroth/<split>/<split>_XXXXX.wav`
 - 입력 메타: `data/zeroth/raw_samples_<split>.jsonl`
-- 출력 정렬: `data/labels/raw_alignment.jsonl`
+- 출력 정렬: `data/labels/<split>/raw_alignment.jsonl`
 
 ## 설정 (`configs/default_config.yaml`)
 ```yaml
 paths:
   input_audio_dir: "./assets/zeroth"
   raw_samples_path: "./data/zeroth/raw_samples_train.jsonl"
-  alignment_output_path: "./data/labels/raw_alignment.jsonl"
+  alignment_output_dir: "./data/labels"
 
 aligner:
   model_name: "large-v3"
@@ -28,14 +28,13 @@ aligner:
 ## 실행 명령
 ```bash
 conda activate hallucination_synth
-python -m src.pipeline.step_01_align \
-  --config configs/default_config.yaml \
-  --split train \
-  --limit 20
+bash scripts/pipeline/run_alignment_cpu.sh train --limit 20
+
+# 테스트셋 정렬
+bash scripts/pipeline/run_alignment_cpu.sh test --limit 20
 ```
-- `--split`: JSONL의 `split` 필터. test 정렬 시 `--split test`와 `raw_samples_path` 교체.
-- `--limit`: 소량 검증 후 제거하고 전체 실행.
-- `--raw-samples`, `--out` 옵션으로 경로를 덮어쓸 수 있습니다.
+- 스크립트는 `data/zeroth/raw_samples_<split>.jsonl`을 자동으로 참조하고 `data/labels/<split>/raw_alignment.jsonl`에 결과를 저장합니다.
+- 직접 실행할 경우 `--raw-samples`, `--out` 옵션으로 경로를 지정할 수 있습니다.
 
 ## 출력 스키마 요약
 ```json
@@ -69,6 +68,6 @@ python -m src.pipeline.step_01_align \
 - diarization이 필요 없으면 `diarize: false` (pyannote 종속성 로드 방지).
 
 ## 검증 체크리스트
-- `data/labels/raw_alignment.jsonl` 라인 수가 입력 샘플 수와 일치하는지 확인
+- `data/labels/<split>/raw_alignment.jsonl` 라인 수가 입력 샘플 수와 일치하는지 확인
 - 몇 개 레코드에서 `alignment.coverage.aligned_word_ratio`가 0.8 이상인지 확인 (낮으면 재실행/필터 고려)
 - `status="error"` 레코드가 있는지 확인하고, 필요 시 재시도 또는 샘플 제외
