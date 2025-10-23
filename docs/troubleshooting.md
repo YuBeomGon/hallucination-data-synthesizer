@@ -26,3 +26,11 @@
    - VAD로 나눈 구간/문장 단위로 segment를 생성하고 각각 align 수행
 4. **score 검사 후 재시도** (선택)
    - `word_segments`의 score가 특정 임계값 이하일 경우 정렬 재시도 또는 구간 skip
+
+### 추가 사례
+- `align_model_name`을 `kresnik/wav2vec2-large-xlsr-korean`으로 설정하고 다시 정렬을 수행했지만, 샘플 `062fce2e3a36e053`에서 여전히 `최소화하기` 이후 단어들이 10초 대로 몰리는 현상이 확인됨.
+- 정렬 모델이 올바르게 로드되었음에도 불구하고 score가 0 또는 매우 낮은 값을 갖는다면, 해당 위치에서 CTC가 덮어쓰기 실패를 일으킨 것으로 판단할 수 있음.
+- 이 경우:
+  - 다른 한국어 CTC 모델(예: `kresnik/wav2vec2-large-xls-r-300m-korean`)을 시도
+  - 긴 문장을 짧은 문장 단위로 나누거나, 자모/완성형 변환을 적용해 문자 집합 불일치를 줄이기
+  - 마지막 수단으로 alignment 품질이 낮은 구간은 증강 대상에서 제외하는 fallback 전략을 고려
