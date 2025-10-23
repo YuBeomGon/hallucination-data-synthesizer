@@ -29,7 +29,7 @@ hallucination-data-synthesizer/
 │   │   ├── build_noise_catalog.py
 │   │   └── preprocess_noise_resample.py
 │   └── pipeline/
-│       ├── run_alignment_cpu.sh
+│       ├── run_alignment.sh
 │       └── run_synthesis.sh
 ├── assets/
 │   ├── noises/

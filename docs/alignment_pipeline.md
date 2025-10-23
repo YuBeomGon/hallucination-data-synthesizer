@@ -28,10 +28,10 @@ aligner:
 ## 실행 명령
 ```bash
 conda activate hallucination_synth
-bash scripts/pipeline/run_alignment_cpu.sh train --limit 20
+bash scripts/pipeline/run_alignment.sh train --limit 20
 
 # 테스트셋 정렬
-bash scripts/pipeline/run_alignment_cpu.sh test --limit 20
+bash scripts/pipeline/run_alignment.sh test --limit 20
 ```
 - 스크립트는 `data/zeroth/raw_samples_<split>.jsonl`을 자동으로 참조하고 `data/labels/<split>/raw_alignment.jsonl`에 결과를 저장합니다.
 - 직접 실행할 경우 `--raw-samples`, `--out` 옵션으로 경로를 지정할 수 있습니다.
