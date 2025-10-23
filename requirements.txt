@@ -9,6 +9,7 @@ pandas
 pydub
 PyYAML
 pyloudnorm
+openai-whisper
 scipy
 torchaudio
 pytest

@@ -1,16 +1,20 @@
-"""Step 01: Generate precise word-level alignments using WhisperX."""
+"""Step 01: Align transcripts using WhisperX alignment without ASR transcription."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-from tqdm import tqdm
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
-from src.modules.whisperx_wrapper import WhisperXWrapper
+import numpy as np
+from tqdm import tqdm
+
+import whisper
+import whisperx
+
 from src.utils.config_loader import load_yaml
 from src.utils.file_io import write_jsonl
 from src.utils.logging_config import configure_logging
@@ -18,11 +22,11 @@ from src.utils.logging_config import configure_logging
 
 LOGGER = logging.getLogger(__name__)
 
+SAMPLE_RATE = 16000
+
 
 @dataclass
 class RawSample:
-    """Container for raw sample metadata prior to alignment."""
-
     sample_id: str
     audio_path: Path
     text: str
@@ -33,51 +37,73 @@ class RawSample:
     extras: Dict[str, Any] = field(default_factory=dict)
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for the alignment step."""
+class TranscriptAligner:
+    """Align fixed transcripts to audio using WhisperX CTC alignment."""
 
+    def __init__(self, model_name: str, device: str, language: Optional[str]) -> None:
+        self.model_name = model_name
+        self.device = device
+        self.language = language or "en"
+        LOGGER.info("Loading tokenizer for %s (%s)", model_name, self.language)
+        multilingual = not model_name.endswith(".en")
+        self.tokenizer = whisper.tokenizer.get_tokenizer(
+            multilingual=multilingual,
+            language=self.language,
+        )
+        LOGGER.info("Loading align model (%s, %s)", self.language, device)
+        self.align_model, self.metadata = whisperx.load_align_model(
+            language_code=self.language,
+            device=device,
+        )
+        self.version = getattr(whisperx, "__version__", "unknown")
+
+    def align(self, audio_path: Path, text: str) -> Dict[str, Any]:
+        audio = whisperx.load_audio(str(audio_path))
+        tokens = self.tokenizer.encode(text)[0]
+        duration = len(audio) / SAMPLE_RATE
+        segments = [
+            {
+                "id": 0,
+                "seek": 0,
+                "start": 0.0,
+                "end": duration,
+                "text": text,
+                "tokens": tokens,
+                "temperature": 0.0,
+                "avg_logprob": 0.0,
+                "compression_ratio": 0.0,
+                "no_speech_prob": 0.0,
+            }
+        ]
+        result = whisperx.align(
+            segments,
+            self.align_model,
+            self.metadata,
+            audio,
+            device=self.device,
+        )
+        result["audio_duration_sec"] = duration
+        result["segment_start"] = 0.0
+        result["segment_end"] = duration
+        return result
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=Path("configs/default_config.yaml"),
-        help="Path to the YAML configuration file.",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default=None,
-        help="Optional dataset split to process (e.g., train, validation).",
-    )
-    parser.add_argument(
-        "--raw-samples",
-        type=Path,
-        default=None,
-        help="Override path to the raw samples JSONL file.",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=None,
-        help="Destination path for the alignment JSONL output.",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Optional limit on number of samples to process (for smoke tests).",
-    )
+    parser.add_argument("--config", type=Path, default=Path("configs/default_config.yaml"))
+    parser.add_argument("--split", type=str, default=None)
+    parser.add_argument("--raw-samples", type=Path, default=None)
+    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--limit", type=int, default=None)
     return parser.parse_args()
 
 
 def load_raw_samples(
     raw_path: Path,
     audio_root: Path,
-    split_filter: Optional[str] = None,
-    limit: Optional[int] = None,
+    split_filter: Optional[str],
+    limit: Optional[int],
 ) -> Iterator[RawSample]:
-    """Yield raw samples from a JSONL file matching the optional split filter."""
-
     emitted = 0
     with raw_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -90,7 +116,6 @@ def load_raw_samples(
             sample_id = payload.get("sample_id")
             audio_rel = payload.get("audio_path")
             text = payload.get("text", "")
-
             if not sample_id or not audio_rel:
                 LOGGER.warning("Skipping malformed sample entry: %s", payload)
                 continue
@@ -120,158 +145,79 @@ def load_raw_samples(
                 break
 
 
-def compute_alignment_metrics(
-    alignment: Dict[str, Any],
-    reference_text: str,
-) -> Dict[str, Optional[float]]:
-    """Compute coverage metrics from an alignment payload."""
-
-    segments = alignment.get("segments", [])
-    speech_duration = 0.0
-    audio_end = 0.0
-    aligned_word_count = 0
-    confidence_total = 0.0
-    confidence_count = 0
-
-    for segment in segments:
-        start = float(segment.get("start")) if segment.get("start") is not None else None
-        end = float(segment.get("end")) if segment.get("end") is not None else None
-        if start is not None and end is not None:
-            speech_duration += max(0.0, end - start)
-            audio_end = max(audio_end, end)
-
-        for word in segment.get("words", []):
-            if word.get("start") is not None and word.get("end") is not None:
-                aligned_word_count += 1
-            if word.get("confidence") is not None:
-                confidence_total += float(word["confidence"])
-                confidence_count += 1
-
-    speech_coverage = speech_duration / audio_end if audio_end else 0.0
-    reference_word_count = len(reference_text.split()) if reference_text else 0
-    aligned_word_ratio = (
-        aligned_word_count / reference_word_count if reference_word_count else None
-    )
-    avg_conf = confidence_total / confidence_count if confidence_count else None
-
-    return {
-        "speech_coverage": speech_coverage,
-        "aligned_word_ratio": aligned_word_ratio,
-        "avg_conf": avg_conf,
-        "audio_duration_sec": audio_end or None,
-    }
-
-
-def convert_words(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Flatten word-level information from aligned segments."""
-
-    words: List[Dict[str, Any]] = []
-    for segment in segments:
-        for word in segment.get("words", []):
-            words.append(
-                {
-                    "w": word.get("word"),
-                    "start": word.get("start"),
-                    "end": word.get("end"),
-                    "conf": word.get("confidence"),
-                }
-            )
-    return words
-
-
-def convert_tokens(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Flatten token-level information when available."""
-
-    tokens: List[Dict[str, Any]] = []
-    for segment in segments:
-        for token in segment.get("tokens", []):
-            tokens.append(
-                {
-                    "t": token.get("token") or token.get("text"),
-                    "start": token.get("start"),
-                    "end": token.get("end"),
-                }
-            )
-    return tokens
-
-
-def extract_speech_regions(segments: List[Dict[str, Any]]) -> List[Dict[str, float]]:
-    """Create a list of speech regions from aligned segments."""
-
-    regions: List[Dict[str, float]] = []
-    for segment in segments:
-        start = segment.get("start")
-        end = segment.get("end")
-        if start is None or end is None:
-            continue
-        regions.append({"start": float(start), "end": float(end)})
-    return regions
-
-
 def build_alignment_record(
     sample: RawSample,
-    wrapper: WhisperXWrapper,
-    aligner_config: Dict[str, Any],
+    align_result: Dict[str, Any],
+    aligner: TranscriptAligner,
+    aligner_cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Align a single sample and build the JSONL record."""
+    words = align_result.get("word_segments", [])
+    if not words:
+        raise ValueError("Alignment produced no word segments")
 
-    try:
-        result = wrapper.transcribe_and_align(sample.audio_path)
-        alignment = result["alignment"]
-        transcription = result["transcription"]
-        segments: List[Dict[str, Any]] = alignment.get("segments", [])
+    segment_start = float(align_result.get("segment_start", 0.0))
+    segment_end = float(align_result.get("segment_end", segment_start))
+    first_start = float(words[0].get("start", segment_start))
+    last_end = float(words[-1].get("end", segment_end))
+    audio_duration = align_result.get("audio_duration_sec") or max(segment_end, last_end)
+    speech_duration = max(0.0, last_end - first_start)
+    speech_coverage = min(1.0, speech_duration / audio_duration) if audio_duration else 0.0
+    word_count = len(sample.text.split()) or 1
+    avg_conf = np.mean([w.get("score") for w in words if w.get("score") is not None])
 
-        metrics = compute_alignment_metrics(alignment, sample.text)
-        record = {
-            "sample_id": sample.sample_id,
-            "audio_path": str(sample.audio_path),
-            "text": sample.text,
-            "split": sample.split,
-            "language": sample.language or aligner_config.get("language"),
-            "alignment": {
-                "words": convert_words(segments),
-                "tokens": convert_tokens(segments),
-                "coverage": metrics,
-            },
-            "speech_regions": extract_speech_regions(segments),
-            "tool_version": {"whisperx": wrapper.version},
-            "model_name": wrapper.model_name,
-            "rng_seed": aligner_config.get("rng_seed"),
-            "auto_transcript": transcription.get("text"),
-            "status": "ok",
-            "error_msg": None,
+    alignment_words = [
+        {
+            "w": w.get("word"),
+            "start": w.get("start"),
+            "end": w.get("end"),
+            "score": w.get("score"),
         }
+        for w in words
+    ]
 
-        if sample.sr_hz is not None:
-            record["sr_hz"] = sample.sr_hz
-        if sample.channels is not None:
-            record["channels"] = sample.channels
-        if sample.extras:
-            record.update(sample.extras)
+    coverage = {
+        "speech_coverage": speech_coverage,
+        "aligned_word_ratio": 1.0,
+        "avg_conf": float(avg_conf) if avg_conf is not None else None,
+        "audio_duration_sec": audio_duration,
+    }
 
-        return record
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to align sample %s", sample.sample_id)
-        return {
-            "sample_id": sample.sample_id,
-            "audio_path": str(sample.audio_path),
-            "text": sample.text,
-            "split": sample.split,
-            "language": sample.language or aligner_config.get("language"),
-            "alignment": None,
-            "speech_regions": [],
-            "tool_version": {"whisperx": wrapper.version},
-            "model_name": wrapper.model_name,
-            "rng_seed": aligner_config.get("rng_seed"),
-            "auto_transcript": None,
-            "status": "error",
-            "error_msg": str(exc),
-        }
+    record = {
+        "sample_id": sample.sample_id,
+        "audio_path": str(sample.audio_path),
+        "text": sample.text,
+        "split": sample.split,
+        "language": sample.language or aligner_cfg.get("language"),
+        "alignment": {
+            "words": alignment_words,
+            "tokens": [],
+            "coverage": coverage,
+        },
+        "speech_regions": [
+            {
+                "start": first_start,
+                "end": last_end,
+            }
+        ],
+        "tool_version": {"whisperx": aligner.version},
+        "model_name": aligner.model_name,
+        "rng_seed": aligner_cfg.get("rng_seed"),
+        "auto_transcript": sample.text,
+        "status": "ok",
+        "error_msg": None,
+    }
+
+    if sample.sr_hz is not None:
+        record["sr_hz"] = sample.sr_hz
+    if sample.channels is not None:
+        record["channels"] = sample.channels
+    if sample.extras:
+        record.update(sample.extras)
+
+    return record
 
 
 def run_alignment(config: Dict[str, Any], args: argparse.Namespace) -> None:
-    """Execute the alignment pipeline using the provided configuration."""
-
     paths = config.get("paths", {})
     aligner_cfg = config.get("aligner", {})
 
@@ -285,16 +231,13 @@ def run_alignment(config: Dict[str, Any], args: argparse.Namespace) -> None:
             output_path = output_base / args.split / "raw_alignment.jsonl"
         else:
             output_path = output_base / "raw_alignment.jsonl"
+
     audio_root = Path(paths.get("input_audio_dir", ".")).resolve()
 
-    wrapper = WhisperXWrapper(
+    aligner = TranscriptAligner(
         model_name=aligner_cfg.get("model_name", "large-v3"),
         device=aligner_cfg.get("device", "cuda"),
         language=aligner_cfg.get("language"),
-        compute_type=aligner_cfg.get("compute_type"),
-        batch_size=int(aligner_cfg.get("batch_size", 8)),
-        vad_backend=aligner_cfg.get("vad_backend"),
-        diarize=bool(aligner_cfg.get("diarize", False)),
     )
 
     LOGGER.info("Loading raw samples from %s", raw_samples_path)
@@ -305,15 +248,36 @@ def run_alignment(config: Dict[str, Any], args: argparse.Namespace) -> None:
         limit=args.limit,
     )
 
-    records = (build_alignment_record(sample, wrapper, aligner_cfg) for sample in tqdm(samples))
+    records: List[Dict[str, Any]] = []
+    for sample in tqdm(list(samples), desc="Aligning"):
+        try:
+            align_result = aligner.align(sample.audio_path, sample.text)
+            record = build_alignment_record(sample, align_result, aligner, aligner_cfg)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed sample %s", sample.sample_id)
+            record = {
+                "sample_id": sample.sample_id,
+                "audio_path": str(sample.audio_path),
+                "text": sample.text,
+                "split": sample.split,
+                "language": sample.language or aligner_cfg.get("language"),
+                "alignment": None,
+                "speech_regions": [],
+                "tool_version": {"whisperx": aligner.version},
+                "model_name": aligner.model_name,
+                "rng_seed": aligner_cfg.get("rng_seed"),
+                "auto_transcript": sample.text,
+                "status": "error",
+                "error_msg": str(exc),
+            }
+        records.append(record)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_jsonl(output_path, records)
     LOGGER.info("Alignment records written to %s", output_path)
 
 
 def main() -> None:
-    """CLI entrypoint."""
-
     configure_logging()
     args = parse_args()
     config = load_yaml(args.config)

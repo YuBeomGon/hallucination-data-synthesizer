@@ -57,7 +57,7 @@ hallucination-data-synthesizer/
     ├── modules/
     │   ├── audio_processor.py
     │   ├── label_generator.py
-    │   └── whisperx_wrapper.py
+    │   └── noise_selector.py
     └── utils/
         ├── file_io.py
         ├── logging_config.py
@@ -97,10 +97,6 @@ aligner:
   model_name: "large-v3"
   language: "ko"
   device: "cuda"
-  compute_type: "float16"   # CPU 사용 시 "float32" 권장
-  batch_size: 8
-  vad_backend: "none"
-  diarize: false
   rng_seed: 42
 
 synthesis:
@@ -186,9 +182,11 @@ labelling:
 
 ## 파이프라인 단계별 I/O 계약
 ### Step 01 – Alignment (`src/pipeline/step_01_align.py`)
+WhisperX ASR를 실행하지 않고 Zeroth 정답 텍스트만으로 CTC align을 수행합니다.
+
 입력:
 - Zeroth 등 원본 데이터를 전처리한 `data/zeroth/raw_samples_<split>.jsonl`
-- WhisperX 정렬 설정(`aligner.model_name`, `device`, `language`, `batch_size`, `vad_backend`, `diarize` 등)
+- WhisperX 정렬 설정(`aligner.model_name`, `device`, `language`)
 
 출력(`data/labels/<split>/raw_alignment.jsonl`):
 ```json
@@ -198,24 +196,19 @@ labelling:
   "text": "안녕하세요 반갑습니다.",
   "alignment": {
     "words": [
-      {"w": "안녕하세요", "start": 0.52, "end": 1.21, "conf": 0.95},
-      {"w": "반갑습니다", "start": 1.82, "end": 2.49, "conf": 0.98}
-    ],
-    "tokens": [
-      {"t": "안", "start": 0.52, "end": 0.62},
-      {"t": "녕", "start": 0.62, "end": 0.69}
+      {"w": "안녕하세요", "start": 0.50, "end": 1.21, "score": 0.95},
+      {"w": "반갑습니다", "start": 1.82, "end": 2.49, "score": 0.98}
     ],
     "coverage": {
-      "speech_coverage": 0.86,
+      "speech_coverage": 1.0,
       "aligned_word_ratio": 1.00,
       "avg_conf": 0.965
     }
   },
   "speech_regions": [
-    {"start": 0.48, "end": 1.25},
-    {"start": 1.78, "end": 2.55}
+    {"start": 0.48, "end": 2.55}
   ],
-  "tool_version": {"whisperx": "x.y.z"},
+  "tool_version": {"whisperx": "3.x"},
   "model_name": "large-v3",
   "rng_seed": 42,
   "status": "ok",
@@ -224,8 +217,8 @@ labelling:
 ```
 체크포인트:
 - 정렬 실패 시에도 레코드를 남기고 `status="error"`로 표기합니다.
-- 문장부호·공백 정규화 규칙을 사전 정의해 WER/정렬 비교의 일관성을 유지합니다.
-- 30초 이상 긴 오디오는 WhisperX 세그 단위 정렬 후 `segment_boundaries`로 경계를 저장합니다.
+- Whisper 추론을 하지 않으므로 `auto_transcript`는 정답 텍스트와 동일합니다.
+- 오디오가 30초 이하일 경우 한 번에 정렬하며, 필요 시 오류 레코드는 재시도합니다.
 
 ### Step 02 – Augmentation (`src/pipeline/step_02_augment.py`)
 입력:

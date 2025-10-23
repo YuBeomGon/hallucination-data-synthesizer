@@ -7,89 +7,66 @@ import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict
 
+import numpy as np
 import pytest
 
 
 def _install_whisperx_stub() -> None:
-    module = ModuleType("whisperx")
+    whisperx_module = ModuleType("whisperx")
 
-    def _load_model(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - stub
-        return None
+    def load_align_model(*args: Any, **kwargs: Any):  # pragma: no cover - stub
+        return ("align_model", {"language": kwargs.get("language_code", "ko")})
 
-    def _load_align_model(*args: Any, **kwargs: Any):  # pragma: no cover - stub
-        return ({}, {})
+    def load_audio(path: str) -> np.ndarray:  # pragma: no cover - stub
+        return np.zeros(16000, dtype=np.float32)
 
-    def _load_audio(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - stub
-        return None
+    def align(segments, *args: Any, **kwargs: Any):  # pragma: no cover - stub
+        assert segments and "start" in segments[0]
+        words = [
+            {"word": "안녕하세요", "start": 0.0, "end": 0.7, "score": 0.9},
+            {"word": "반갑습니다", "start": 0.7, "end": 1.4, "score": 0.95},
+        ]
+        return {
+            "word_segments": words,
+            "audio_duration_sec": 1.4,
+            "segment_start": segments[0].get("start", 0.0),
+            "segment_end": segments[0].get("end", 1.4),
+        }
 
-    def _align(segments, *args: Any, **kwargs: Any):  # pragma: no cover - stub
-        return {"segments": segments}
+    whisperx_module.load_align_model = load_align_model
+    whisperx_module.load_audio = load_audio
+    whisperx_module.align = align
+    whisperx_module.__version__ = "stub"
 
-    class _DiarizationPipeline:  # pragma: no cover - stub
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
+    sys.modules["whisperx"] = whisperx_module
 
-        def __call__(self, *args: Any, **kwargs: Any):
-            return []
+    token_module = ModuleType("tokenizer_stub")
 
-    def _assign_word_speakers(diarize_segments, alignment):  # pragma: no cover
-        return alignment
+    class DummyTokenizer:  # pragma: no cover - stub
+        def encode(self, text: str):
+            tokens = list(range(len(text.split()))) or [0]
+            return tokens, text
 
-    module.load_model = _load_model
-    module.load_align_model = _load_align_model
-    module.load_audio = _load_audio
-    module.align = _align
-    module.DiarizationPipeline = _DiarizationPipeline
-    module.assign_word_speakers = _assign_word_speakers
-    module.__version__ = "stub"
+    def get_tokenizer(*args: Any, **kwargs: Any):  # pragma: no cover - stub
+        return DummyTokenizer()
 
-    sys.modules.setdefault("whisperx", module)
+    token_module.get_tokenizer = get_tokenizer
+    utils_module = ModuleType("whisperx.utils")
+    utils_module.tokenization = token_module
+    sys.modules["whisperx.utils"] = utils_module
+    sys.modules["whisperx.utils.tokenization"] = token_module
+
+    whisper_module = ModuleType("whisper")
+    tokenizer_pkg = ModuleType("whisper.tokenizer")
+    tokenizer_pkg.get_tokenizer = get_tokenizer
+    whisper_module.tokenizer = tokenizer_pkg
+    sys.modules["whisper"] = whisper_module
+    sys.modules["whisper.tokenizer"] = tokenizer_pkg
 
 
 _install_whisperx_stub()
 
 from src.pipeline import step_01_align
-
-
-class DummyWrapper:
-    """Test double for ``WhisperXWrapper``."""
-
-    version = "test-version"
-    model_name = "dummy-model"
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def transcribe_and_align(self, audio_path):
-        return {
-            "transcription": {"text": "안녕하세요 반갑습니다."},
-            "alignment": {
-                "segments": [
-                    {
-                        "start": 0.0,
-                        "end": 1.4,
-                        "words": [
-                            {
-                                "word": "안녕하세요",
-                                "start": 0.0,
-                                "end": 0.7,
-                                "confidence": 0.9,
-                            },
-                            {
-                                "word": "반갑습니다",
-                                "start": 0.7,
-                                "end": 1.4,
-                                "confidence": 0.95,
-                            },
-                        ],
-                        "tokens": [
-                            {"token": "안", "start": 0.0, "end": 0.2},
-                            {"token": "녕", "start": 0.2, "end": 0.4},
-                        ],
-                    }
-                ],
-            },
-        }
 
 
 def _write_jsonl(path, records):
@@ -106,8 +83,6 @@ def _read_jsonl(path):
 
 
 def test_run_alignment_writes_expected_output(tmp_path, monkeypatch):
-    monkeypatch.setattr(step_01_align, "WhisperXWrapper", DummyWrapper)
-
     raw_samples = tmp_path / "raw_samples.jsonl"
     audio_dir = tmp_path / "audio"
     audio_dir.mkdir()
@@ -162,7 +137,7 @@ def test_run_alignment_writes_expected_output(tmp_path, monkeypatch):
     assert record["alignment"]["words"][0]["w"] == "안녕하세요"
     assert record["alignment"]["words"][1]["end"] == 1.4
     assert record["speech_regions"][0]["start"] == 0.0
-    assert record["tool_version"]["whisperx"] == DummyWrapper.version
+    assert record["tool_version"]["whisperx"] == "stub"
     assert record["auto_transcript"] == "안녕하세요 반갑습니다."
     coverage = record["alignment"]["coverage"]
     assert coverage["speech_coverage"] == pytest.approx(1.0)
@@ -170,8 +145,6 @@ def test_run_alignment_writes_expected_output(tmp_path, monkeypatch):
 
 
 def test_run_alignment_respects_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(step_01_align, "WhisperXWrapper", DummyWrapper)
-
     raw_samples = tmp_path / "raw_samples.jsonl"
     audio_dir = tmp_path / "audio"
     audio_dir.mkdir()
