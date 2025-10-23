@@ -28,6 +28,8 @@ synthesis:
     min_pause_sec: 0.3
     max_pause_sec: 1.0
     allow_silence_prob: 0.2
+    fade_ms: 20
+    context_window_sec: 0.75
   time_stretch:
     enable: false
     min_ratio: 0.95

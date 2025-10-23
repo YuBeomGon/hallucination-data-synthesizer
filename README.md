@@ -64,11 +64,11 @@ pip install -r requirements.txt
 ```
 
 ## 빠른 실행 흐름
-1. `configs/two_utterances.yaml`을 생성하고 새 데이터 경로·증강 옵션을 정의합니다.
+1. `configs/two_utterances.yaml`을 작성해 경로·증강 옵션을 정의합니다.
 2. 노이즈 데이터(AI Hub)를 다운로드하고 카탈로그/리샘플 캐시를 빌드합니다.
-3. Zeroth_v2 원본과 화자 페어 목록을 준비합니다.
-4. Step 01 정렬 → Step 02 두 발화 합성 → Step 03 라벨 생성을 실행합니다.
-5. `data/labels_v2/<split>/metadata.jsonl`과 `data/augmented_audio_v2/<split>`을 확인합니다.
+3. `scripts/datasets/export_zeroth_v2.py`로 Zeroth_v2 WAV/JSONL을 준비합니다.
+4. `python -m src.pipeline.step_01_two_utterances ...`로 결합 오디오와 `paired_meta.jsonl`을 생성합니다.
+5. (선택) Step 02 라벨 빌드를 실행하여 `data/labels_v2/<split>/metadata.jsonl`을 생성합니다.
 
 ## 데이터 준비
 
@@ -119,6 +119,12 @@ python scripts/noise/preprocess_noise_resample.py \
 ## 파이프라인 단계
 
 ### Step 01 – Two-Utterance Synthesis (신규)
+- 실행:
+  ```bash
+  python -m src.pipeline.step_01_two_utterances \
+    --config configs/two_utterances.yaml \
+    --split train
+  ```
 - 입력: `data/zeroth_v2/raw_samples_<split>.jsonl`, 노이즈 카탈로그 & WAV
 - 처리:
   - 동일 화자 발화를 길이 제한(<40초 등) 안에서 랜덤 샘플링하고, 필요 시 `time_stretch` 비율을 적용합니다.
@@ -129,6 +135,7 @@ python scripts/noise/preprocess_noise_resample.py \
   - 메타: `data/labels_v2/<split>/paired_meta.jsonl`
     - `pair_id`, `speaker_id`, `source_samples`, `transition`, `noise`, `timings`(utterance A, noise, utterance B), `combined_text`, `status`, `error_msg`
 - 실패 시: 길이 초과, 노이즈 미존재 등 사유를 기록하고 `status`를 `skip`/`error`로 설정합니다.
+- 구성 옵션과 메타 구조는 `docs/two_utterances_pipeline.md`에서 더 자세히 다룹니다.
 
 ### Step 02 – Label Build (`src/pipeline/step_03_build_labels.py`, 확장 예정)
 - 입력: Step 01 산출물(WAV + paired_meta), 베이스라인 STT 모델 추론 결과(또는 모듈 내 추론)
@@ -169,6 +176,8 @@ synthesis:
     min_pause_sec: 0.3
     max_pause_sec: 1.0
     allow_silence_prob: 0.2
+    fade_ms: 20
+    context_window_sec: 0.75
   time_stretch:
     enable: false
     min_ratio: 0.95
