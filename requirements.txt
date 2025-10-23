@@ -8,6 +8,7 @@ numpy
 pandas
 pydub
 PyYAML
+pyloudnorm
 scipy
 torchaudio
 pytest

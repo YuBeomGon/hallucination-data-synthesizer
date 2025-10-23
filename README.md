@@ -104,10 +104,19 @@ aligner:
   rng_seed: 42
 
 synthesis:
-  min_gap_ms: 1000
-  insertion_duration_ms: 3000
-  insertion_type: "noise"  # "silence" 또는 "noise"
-  crossfade_ms: 50
+  insertion_type: "noise"
+  min_gap_sec: 0.5
+  insertion_duration_sec:
+    min: 1.5
+    max: 3.0
+  crossfade_sec: 0.05
+  context_window_sec: 0.75
+  target_snr_db: 12.0
+  loudness_target_lufs: -23.0
+  true_peak_dbfs: -1.0
+  insertions_per_file: 1
+  rng_seed: 4242
+  noise_categories: []
 
 labelling:
   baseline_model_name: "openai/whisper-large-v3"
@@ -156,6 +165,8 @@ labelling:
 ## 추가 문서
 - `docs/zeroth_preparation.md`: Zeroth 데이터 추출 및 JSONL 작성 방법
 - `docs/alignment_pipeline.md`: WhisperX 정렬 파이프라인 실행 및 출력 검증
+- `docs/augmentation.md`: 노이즈 기반 증강 파이프라인 상세
+- `docs/runbook.md`: 전체 실행 명령 모음
 
 ## 사용 방법
 1. `configs/default_config.yaml`을 프로젝트 환경에 맞게 수정합니다.
@@ -219,8 +230,8 @@ labelling:
 ### Step 02 – Augmentation (`src/pipeline/step_02_augment.py`)
 입력:
 - `data/labels/<split>/raw_alignment.jsonl`
-- 증강 설정(`insertion_type`, `min_gap_ms`, `insertion_duration_ms`, `crossfade_ms`, `snr_db`, `loudness_target_lufs`, `limit_true_peak_dbfs` 등)
-- 다운로드된 소음 파일(`assets/noises`) 또는 침묵 삽입 옵션
+- 증강 설정(`min_gap_sec`, `insertion_duration_sec`, `crossfade_sec`, `target_snr_db`, `loudness_target_lufs`, `true_peak_dbfs` 등)
+- 노이즈 카탈로그(`data/noise/noise_catalog.csv`) 및 소음 파일(`assets/noises`)
 
 출력:
 - 증강 오디오 `data/augmented_audio/<split>/{aug_id}.wav`
@@ -234,16 +245,21 @@ labelling:
   "augmentation": {
     "events": [
       {
-        "type": "insert_silence",
-        "start_orig": 1.25,
-        "duration": 3.00,
-        "snr_db": null,
-        "crossfade_ms": 50,
-        "noise_src": null
+        "type": "noise",
+        "start_sec": 1.25,
+        "insert_sec": 1.40,
+        "duration_sec": 2.40,
+        "snr_db": 12.1,
+        "crossfade_sec": 0.05,
+        "noise_src": "assets/noises/.../noise.wav",
+        "noise_offset_sec": 0.73,
+        "noise_duration_sec": 2.40
       }
     ],
     "postprocess": {
       "loudness_target_lufs": -23.0,
+      "lufs_before": -21.3,
+      "lufs_after": -23.0,
       "true_peak_dbfs": -1.0,
       "clip_guard_applied": true
     }
@@ -251,11 +267,12 @@ labelling:
   "offset_map": [
     {"t0_src": 0.00, "t0_dst": 0.00},
     {"t0_src": 1.25, "t0_dst": 1.25},
-    {"t0_src": 1.25, "t0_dst": 4.25, "delta": 3.00}
+    {"t0_src": 1.65, "t0_dst": 4.05, "delta": 2.40},
+    {"t0_src": 12.00, "t0_dst": 14.40}
   ],
   "updated_segments": [
     {"w": "안녕하세요", "start": 0.52, "end": 1.21},
-    {"w": "반갑습니다", "start": 4.82, "end": 5.49}
+    {"w": "반갑습니다", "start": 4.22, "end": 4.89}
   ],
   "tool_version": {"ffmpeg": "...", "librosa": "..."},
   "rng_seed": 4242,

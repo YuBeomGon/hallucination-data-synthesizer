@@ -21,10 +21,19 @@ aligner:
   rng_seed: 42
 
 synthesis:
-  min_gap_ms: 1000
-  insertion_duration_ms: 3000
   insertion_type: "noise"
-  crossfade_ms: 50
+  min_gap_sec: 0.5
+  insertion_duration_sec:
+    min: 1.5
+    max: 3.0
+  crossfade_sec: 0.05
+  context_window_sec: 0.75
+  target_snr_db: 12.0
+  loudness_target_lufs: -23.0
+  true_peak_dbfs: -1.0
+  insertions_per_file: 1
+  rng_seed: 4242
+  noise_categories: []
 
 labelling:
   baseline_model_name: "openai/whisper-large-v3"
