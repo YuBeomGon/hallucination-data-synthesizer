@@ -22,7 +22,7 @@ aligner:
 
 synthesis:
   insertion_type: "noise"
-  min_gap_sec: 0.5
+  min_gap_sec: 0.8
   insertion_duration_sec:
     min: 1.5
     max: 3.0
