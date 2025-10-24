@@ -13,7 +13,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
-from pydub import AudioSegment
 
 try:  # pragma: no cover - optional dependency
     import librosa
@@ -40,6 +39,10 @@ class RawSample:
     audio_path: Path
     duration_sec: float
     split: str
+    leading_silence_sec: float = 0.0
+    trailing_silence_sec: float = 0.0
+    leading_silence_samples: int = 0
+    trailing_silence_samples: int = 0
 
 
 @dataclass
@@ -83,6 +86,10 @@ def load_raw_samples(raw_path: Path, audio_root: Path) -> List[RawSample]:
             text = payload.get("text", "")
             duration = float(payload.get("duration_sec", payload.get("duration", 0.0)))
             split = payload.get("split", "train")
+            leading_silence_sec = float(payload.get("leading_silence_sec", 0.0) or 0.0)
+            trailing_silence_sec = float(payload.get("trailing_silence_sec", 0.0) or 0.0)
+            leading_silence_samples = int(payload.get("leading_silence_samples", round(leading_silence_sec * SAMPLE_RATE)))
+            trailing_silence_samples = int(payload.get("trailing_silence_samples", round(trailing_silence_sec * SAMPLE_RATE)))
 
             if not sample_id or not speaker_id or not audio_rel:
                 LOGGER.debug("Skipping malformed raw sample entry: %s", payload)
@@ -99,6 +106,10 @@ def load_raw_samples(raw_path: Path, audio_root: Path) -> List[RawSample]:
                     audio_path=audio_path,
                     duration_sec=float(duration),
                     split=str(split),
+                    leading_silence_sec=leading_silence_sec,
+                    trailing_silence_sec=trailing_silence_sec,
+                    leading_silence_samples=leading_silence_samples,
+                    trailing_silence_samples=trailing_silence_samples,
                 )
             )
 
@@ -114,20 +125,32 @@ def group_by_speaker(samples: Iterable[RawSample]) -> Dict[str, List[RawSample]]
     return grouped
 
 
-def numpy_to_segment(samples: np.ndarray, sample_rate: int) -> AudioSegment:
-    clipped = np.clip(samples, -1.0, 1.0)
-    int_samples = (clipped * 32767.0).astype(np.int16)
-    return AudioSegment(
-        int_samples.tobytes(),
-        frame_rate=sample_rate,
-        sample_width=2,
-        channels=1,
-    )
+def append_segment(base: np.ndarray, segment: np.ndarray, crossfade_samples: int) -> Tuple[np.ndarray, int, int]:
+    if segment.size == 0:
+        start = base.size
+        return base, start, start
+    if base.size == 0 or crossfade_samples <= 0:
+        start = base.size
+        new_base = np.concatenate([base, segment])
+        end = start + segment.size
+        return new_base.astype(np.float32, copy=False), start, end
 
+    overlap = min(crossfade_samples, base.size, segment.size)
+    if overlap <= 0:
+        start = base.size
+        new_base = np.concatenate([base, segment])
+        end = start + segment.size
+        return new_base.astype(np.float32, copy=False), start, end
 
-def segment_to_numpy(segment: AudioSegment) -> np.ndarray:
-    data = np.array(segment.get_array_of_samples()).astype(np.float32)
-    return np.clip(data / 32768.0, -1.0, 1.0)
+    fade = np.linspace(0.0, 1.0, overlap, endpoint=False, dtype=np.float32)
+    faded_base = base[-overlap:] * (1.0 - fade)
+    faded_seg = segment[:overlap] * fade
+    blended = faded_base + faded_seg
+
+    new_base = np.concatenate([base[:-overlap], blended, segment[overlap:]])
+    start = base.size - overlap
+    end = start + segment.size
+    return new_base.astype(np.float32, copy=False), start, end
 
 
 def apply_time_stretch(wave: np.ndarray, ratio: float) -> np.ndarray:
@@ -164,12 +187,18 @@ def sample_noise(
     context: np.ndarray,
     target_snr_db: float,
     fade_ms: int,
+    bandpass_cfg: Optional[Dict[str, Any]],
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     clip: NoiseClip = selector.sample_clip(duration_sec)
     available = max(0.0, clip.clip_duration_sec - duration_sec)
     offset = clip.clip_start_sec + (rng.uniform(0.0, available) if available > 0 else 0.0)
     noise_wave = audio_processor.load_segment(clip.audio_path, offset, duration_sec)
-    noise_wave, achieved = audio_processor.match_snr(noise_wave, context, target_snr_db)
+    noise_wave, achieved = audio_processor.match_snr(
+        noise_wave,
+        context,
+        target_snr_db,
+        bandpass_cfg=bandpass_cfg,
+    )
     noise_wave = audio_processor.apply_fades(noise_wave, fade_sec=fade_ms / 1000.0)
     return noise_wave, {
         "source_path": str(clip.audio_path),
@@ -194,16 +223,23 @@ def synthesize_pair(
     transition_cfg = synthesis_cfg.get("transition", {})
     labelling_cfg = config.get("labelling", {})
 
-    crossfade_sec = float(synthesis_cfg.get("crossfade_sec", 0.1))
-    crossfade_ms = max(0, int(round(crossfade_sec * 1000)))
+    sr = audio_processor.sample_rate
+    crossfade_samples = max(0, int(round(float(synthesis_cfg.get("crossfade_sec", 0.1)) * sr)))
     fade_ms = int(transition_cfg.get("fade_ms", 20))
-    context_window_sec = float(transition_cfg.get("context_window_sec", 0.75))
-    context_samples = max(1, int(round(context_window_sec * audio_processor.sample_rate)))
+    context_before_samples = max(0, int(round(float(transition_cfg.get("context_window_before_sec", 0.5)) * sr)))
+    context_after_samples = max(0, int(round(float(transition_cfg.get("context_window_after_sec", 0.5)) * sr)))
+    bandpass_cfg = transition_cfg.get("bandpass_filter", {})
+
+    allow_silence_prob = float(transition_cfg.get("allow_silence_prob", 0.0))
+    concat_prob = float(transition_cfg.get("concat_without_noise_prob", 0.5))
+    min_silence_concat_sec = float(transition_cfg.get("min_silence_for_direct_concat_sec", 2.5))
+    short_noise_cfg = transition_cfg.get("short_noise_sec", {"min": 0.3, "max": 0.7})
 
     time_stretch_cfg = synthesis_cfg.get("time_stretch", {})
-    stretch_enabled = bool(time_stretch_cfg.get("enable", False))
+    stretch_enabled = bool(time_stretch_cfg.get("enable", True))
     stretch_min = float(time_stretch_cfg.get("min_ratio", 0.95))
     stretch_max = float(time_stretch_cfg.get("max_ratio", 1.05))
+    target_max_after_stretch = float(synthesis_cfg.get("max_total_duration_after_stretch_sec", 30.0))
 
     pause_sec = float(
         rng.uniform(
@@ -211,30 +247,56 @@ def synthesize_pair(
             float(transition_cfg.get("max_pause_sec", 0.0)),
         )
     )
-    silence_ms = max(0, int(round(pause_sec * 1000)))
 
     min_noise_sec = float(transition_cfg.get("min_noise_sec", 1.0))
     max_noise_sec = float(transition_cfg.get("max_noise_sec", 2.5))
     if max_noise_sec < min_noise_sec:
         raise ValueError("transition.max_noise_sec must be >= transition.min_noise_sec")
+
     noise_duration_sec = float(rng.uniform(min_noise_sec, max_noise_sec))
-    allow_silence_prob = float(transition_cfg.get("allow_silence_prob", 0.0))
 
-    noise_type = "silence" if rng.random() < allow_silence_prob else "noise"
+    long_silence = (
+        sample_a.trailing_silence_sec >= min_silence_concat_sec
+        and sample_b.leading_silence_sec >= min_silence_concat_sec
+    )
 
-    # Load audio
+    noise_mode = "noise"
+    if long_silence and rng.random() < concat_prob:
+        noise_mode = "silence_passthrough"
+    elif long_silence:
+        noise_mode = "short_noise"
+    elif rng.random() < allow_silence_prob:
+        noise_mode = "silence"
+
+    if noise_mode == "short_noise":
+        short_min = float(short_noise_cfg.get("min", 0.3))
+        short_max = float(short_noise_cfg.get("max", short_min))
+        if short_max < short_min:
+            short_max = short_min
+        noise_duration_sec = float(rng.uniform(short_min, short_max))
+    elif noise_mode in {"silence", "silence_passthrough"}:
+        noise_duration_sec = 0.0
+
     audio_a = audio_processor.load_waveform(sample_a.audio_path)
     audio_b = audio_processor.load_waveform(sample_b.audio_path)
 
-    ratio_a = rng.uniform(stretch_min, stretch_max) if stretch_enabled else 1.0
-    ratio_b = rng.uniform(stretch_min, stretch_max) if stretch_enabled else 1.0
-    if stretch_enabled:
-        audio_a = apply_time_stretch(audio_a, ratio_a)
-        audio_b = apply_time_stretch(audio_b, ratio_b)
+    duration_a_raw = audio_a.size / sr
+    duration_b_raw = audio_b.size / sr
 
-    duration_a = audio_a.size / audio_processor.sample_rate
-    duration_b = audio_b.size / audio_processor.sample_rate
-    predicted_total = duration_a + duration_b + pause_sec + noise_duration_sec
+    trailing_silence_samples = min(sample_a.trailing_silence_samples, audio_a.size)
+    leading_silence_samples = min(sample_b.leading_silence_samples, audio_b.size)
+
+    speech_a_end = audio_a.size - trailing_silence_samples
+    speech_b_start = leading_silence_samples
+
+    speech_a_use_sec = speech_a_end / sr
+    speech_b_use_sec = (audio_b.size - speech_b_start) / sr
+
+    if noise_mode == "silence_passthrough":
+        predicted_total = duration_a_raw + duration_b_raw
+    else:
+        predicted_total = speech_a_use_sec + pause_sec + noise_duration_sec + speech_b_use_sec
+
     max_total = float(selection_cfg.get("max_total_duration_sec", 40.0))
     if predicted_total > max_total:
         raise SkipPair(
@@ -242,10 +304,48 @@ def synthesize_pair(
             f"for pair {sample_a.sample_id}/{sample_b.sample_id}"
         )
 
-    context = build_context(audio_a, audio_b, context_samples)
-    target_snr_db = float(synthesis_cfg.get("target_snr_db", 10.0))
+    ratio_applied = 1.0
+    if (
+        stretch_enabled
+        and predicted_total > target_max_after_stretch
+        and target_max_after_stretch > 0
+    ):
+        ratio_needed = predicted_total / target_max_after_stretch
+        ratio_applied = min(max(ratio_needed, stretch_min), stretch_max)
+        if ratio_applied > 1.001:
+            audio_a = apply_time_stretch(audio_a, ratio_applied)
+            audio_b = apply_time_stretch(audio_b, ratio_applied)
+            trailing_silence_samples = int(trailing_silence_samples / ratio_applied)
+            leading_silence_samples = int(leading_silence_samples / ratio_applied)
+            sample_a.trailing_silence_sec /= ratio_applied
+            sample_b.leading_silence_sec /= ratio_applied
+            duration_a_raw = audio_a.size / sr
+            duration_b_raw = audio_b.size / sr
+            speech_a_end = max(0, audio_a.size - trailing_silence_samples)
+            speech_b_start = min(audio_b.size, leading_silence_samples)
+            speech_a_use_sec = speech_a_end / sr
+            speech_b_use_sec = (audio_b.size - speech_b_start) / sr
+            if noise_mode == "silence_passthrough":
+                predicted_total = duration_a_raw + duration_b_raw
+            else:
+                predicted_total = speech_a_use_sec + pause_sec + noise_duration_sec + speech_b_use_sec
 
-    if noise_type == "noise":
+    ratio_a = ratio_applied
+    ratio_b = ratio_applied
+
+    context_before = audio_a[max(0, speech_a_end - context_before_samples) : speech_a_end]
+    context_after = audio_b[speech_b_start : min(audio_b.size, speech_b_start + context_after_samples)]
+    if context_before.size or context_after.size:
+        context = np.concatenate([context_before, context_after])
+    else:
+        context = audio_a[-context_before_samples:] if audio_a.size else audio_b[:context_after_samples]
+
+    pause_samples = 0 if noise_mode == "silence_passthrough" else int(round(pause_sec * sr))
+    pause_wave = np.zeros(pause_samples, dtype=np.float32)
+
+    target_snr_db = float(synthesis_cfg.get("target_snr_db", 10.0))
+    noise_meta: Dict[str, Any]
+    if noise_mode in {"noise", "short_noise"}:
         noise_wave, noise_meta = sample_noise(
             selector=noise_selector,
             audio_processor=audio_processor,
@@ -254,88 +354,129 @@ def synthesize_pair(
             context=context,
             target_snr_db=target_snr_db,
             fade_ms=fade_ms,
+            bandpass_cfg=bandpass_cfg,
         )
-    else:
-        noise_wave = np.zeros(int(round(noise_duration_sec * audio_processor.sample_rate)), dtype=np.float32)
+        noise_meta["duration_samples"] = noise_wave.size
+    elif noise_mode == "silence":
+        noise_wave = np.zeros(int(round(noise_duration_sec * sr)), dtype=np.float32)
         noise_meta = {
             "source_path": None,
             "offset_sec": None,
             "duration_sec": round(noise_duration_sec, 3),
             "target_snr_db": None,
             "achieved_snr_db": None,
+            "duration_samples": noise_wave.size,
+        }
+    else:  # silence_passthrough
+        noise_wave = np.zeros(0, dtype=np.float32)
+        noise_meta = {
+            "source_path": None,
+            "offset_sec": None,
+            "duration_sec": 0.0,
+            "target_snr_db": None,
+            "achieved_snr_db": None,
+            "duration_samples": 0,
         }
 
-    silence_segment = AudioSegment.silent(duration=silence_ms)
-    segment_a = numpy_to_segment(audio_a, audio_processor.sample_rate)
-    segment_noise = numpy_to_segment(noise_wave, audio_processor.sample_rate).fade_in(fade_ms).fade_out(fade_ms)
-    segment_b = numpy_to_segment(audio_b, audio_processor.sample_rate)
+    if bandpass_cfg:
+        noise_meta["bandpass"] = bandpass_cfg
 
-    combined = segment_a
-    # Append silence (no crossfade)
-    if silence_ms > 0:
-        combined = combined.append(silence_segment, crossfade=0)
+    if noise_mode == "silence_passthrough":
+        base_wave = audio_a.copy()
+        crossfade_noise_samples = 0
+        crossfade_b_samples = 0
+        transition_start_sample = max(0, len(audio_a) - trailing_silence_samples)
+        transition_end_sample = transition_start_sample + trailing_silence_samples + leading_silence_samples
+        timeline = base_wave
+    else:
+        speech_a = audio_a[:speech_a_end].copy()
+        speech_b = audio_b[speech_b_start:].copy()
+        timeline = speech_a
+        transition_start_sample = len(timeline)
+        timeline, _, _ = append_segment(timeline, pause_wave, 0)
+        crossfade_noise_samples = min(crossfade_samples, timeline.size, noise_wave.size) if noise_wave.size else 0
+        if noise_wave.size:
+            timeline, noise_start_sample, noise_end_sample = append_segment(timeline, noise_wave, crossfade_noise_samples)
+        else:
+            noise_start_sample = len(timeline)
+            noise_end_sample = len(timeline)
+        transition_end_sample = noise_end_sample
+        crossfade_b_samples = min(crossfade_samples, timeline.size, len(speech_b))
+        timeline, b_start_sample, b_end_sample = append_segment(timeline, speech_b, crossfade_b_samples)
+        audio_b = speech_b  # update for metadata durations
+    if noise_mode == "silence_passthrough":
+        timeline, b_start_sample, b_end_sample = append_segment(timeline, audio_b, 0)
+        noise_start_sample = transition_start_sample
+        noise_end_sample = transition_end_sample
+        crossfade_b_samples = 0
+        crossfade_noise_samples = 0
 
-    prev_len_ms = len(combined)
-    noise_len_ms = len(segment_noise)
-    noise_crossfade_ms = min(crossfade_ms, prev_len_ms, noise_len_ms)
-    combined = combined.append(segment_noise, crossfade=crossfade_ms if noise_crossfade_ms > 0 else 0)
-    noise_start_ms = prev_len_ms - noise_crossfade_ms
-    noise_end_ms = prev_len_ms + noise_len_ms - noise_crossfade_ms
+    total_samples = len(timeline)
+    total_duration_sec = total_samples / sr
 
-    prev_len_ms = len(combined)
-    b_len_ms = len(segment_b)
-    b_crossfade_ms = min(crossfade_ms, prev_len_ms, b_len_ms)
-    combined = combined.append(segment_b, crossfade=crossfade_ms if b_crossfade_ms > 0 else 0)
-    b_start_ms = prev_len_ms - b_crossfade_ms
-    total_len_ms = len(combined)
-
-    # Convert back to numpy and normalize loudness
-    combined_wave = segment_to_numpy(combined)
-    loudness_report, normalized_wave = audio_processor.normalize_loudness(combined_wave)
-    total_duration_sec = normalized_wave.size / audio_processor.sample_rate
+    loudness_report, normalized_wave = audio_processor.normalize_loudness(timeline)
+    normalized_wave = audio_processor.apply_tpdf_dither(normalized_wave)
+    np.clip(normalized_wave, -1.0, 1.0, out=normalized_wave)
 
     pair_id = f"{sample_a.speaker_id}_{sample_a.sample_id}_{sample_b.sample_id}"
 
-    transition_token = labelling_cfg.get("transition_token", "<SIL_TRANS>")
+    transition_token = labelling_cfg.get("transition_token", "<SIL>")
     combined_text = f"{sample_a.text.strip()} {sample_b.text.strip()}".strip()
     combined_with_token = f"{sample_a.text.strip()} {transition_token} {sample_b.text.strip()}".strip()
 
-    transition_start_sec = max(0.0, noise_start_ms / 1000.0)
-    transition_end_sec = max(transition_start_sec, noise_end_ms / 1000.0)
-    utterance_b_start_sec = max(transition_end_sec - b_crossfade_ms / 1000.0, 0.0)
+    speech_a_end_sample = len(audio_a) if noise_mode == "silence_passthrough" else audio_a.size
+    speech_a_output_end_sample = len(audio_a) if noise_mode == "silence_passthrough" else speech_a_end
+    speech_b_start_output = b_start_sample if noise_mode != "silence_passthrough" else b_start_sample + leading_silence_samples
+    speech_a_output_end_sample = int(speech_a_output_end_sample)
+    speech_b_start_output = int(speech_b_start_output)
+
+    transition_start_sec = transition_start_sample / sr
+    transition_end_sec = transition_end_sample / sr
 
     metadata = {
         "pair_id": pair_id,
         "speaker_id": sample_a.speaker_id,
         "split": sample_a.split,
         "audio": {
-            "sample_rate": audio_processor.sample_rate,
+            "sample_rate": sr,
             "duration_sec": round(total_duration_sec, 3),
+            "duration_samples": total_samples,
             "loudness": asdict(loudness_report),
         },
         "segments": {
             "utterance_a": {
                 "sample_id": sample_a.sample_id,
-                "duration_sec": round(duration_a, 3),
+                "duration_sec": round(duration_a_raw, 3),
                 "stretch_ratio": round(ratio_a, 4),
                 "output_start_sec": 0.0,
-                "output_end_sec": round(duration_a, 3),
+                "output_end_sec": round(speech_a_output_end_sample / sr, 3),
+                "output_start_sample": 0,
+                "output_end_sample": int(speech_a_output_end_sample),
             },
             "transition": {
-                "type": noise_type,
+                "type": noise_mode,
                 "start_sec": round(transition_start_sec, 3),
                 "end_sec": round(transition_end_sec, 3),
-                "pause_sec": round(pause_sec, 3),
-                "crossfade_in_sec": round(noise_crossfade_ms / 1000.0, 3),
-                "crossfade_out_sec": round(b_crossfade_ms / 1000.0, 3),
+                "start_sample": int(transition_start_sample),
+                "end_sample": int(transition_end_sample),
+                "pause_sec": round(pause_sec if noise_mode != "silence_passthrough" else 0.0, 3),
+                "pause_samples": pause_samples if noise_mode != "silence_passthrough" else 0,
+                "crossfade_in_sec": round(crossfade_noise_samples / sr, 3),
+                "crossfade_out_sec": round(crossfade_b_samples / sr, 3),
                 "noise": noise_meta,
+                "decision": {
+                    "mode": noise_mode,
+                    "long_silence": long_silence,
+                },
             },
             "utterance_b": {
                 "sample_id": sample_b.sample_id,
-                "duration_sec": round(duration_b, 3),
+                "duration_sec": round(duration_b_raw, 3),
                 "stretch_ratio": round(ratio_b, 4),
-                "output_start_sec": round(utterance_b_start_sec, 3),
+                "output_start_sec": round(speech_b_start_output / sr, 3),
                 "output_end_sec": round(total_duration_sec, 3),
+                "output_start_sample": int(speech_b_start_output),
+                "output_end_sample": total_samples,
             },
         },
         "text": {
@@ -349,8 +490,18 @@ def synthesize_pair(
             "rng_seed": rng_seed,
             "time_stretch": {
                 "enabled": stretch_enabled,
-                "ratio_a": round(ratio_a, 4),
-                "ratio_b": round(ratio_b, 4),
+                "ratio": round(ratio_applied, 4),
+            },
+            "noise_mode": noise_mode,
+            "snr": {
+                "target_db": target_snr_db if noise_mode in {"noise", "short_noise"} else None,
+                "context_before_samples": context_before_samples,
+                "context_after_samples": context_after_samples,
+                "bandpass": bandpass_cfg,
+            },
+            "silence": {
+                "trailing_a_sec": sample_a.trailing_silence_sec,
+                "leading_b_sec": sample_b.leading_silence_sec,
             },
         },
         "tool_version": {"step_01_two_utterances": STEP_VERSION},

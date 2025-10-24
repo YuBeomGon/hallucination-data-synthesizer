@@ -15,30 +15,42 @@ selection:
   max_length_ratio: 3.0
   allow_cross_split: false
   rng_seed: 777
+  vad_backend: "silero"
+  vad_window_sec: 0.03
 
 synthesis:
-  mode: "two_utterances"
   crossfade_sec: 0.1
   target_snr_db: 10.0
   loudness_target_lufs: -23.0
   true_peak_dbfs: -1.0
+  max_total_duration_after_stretch_sec: 30.0
   transition:
     min_noise_sec: 1.0
     max_noise_sec: 2.5
     min_pause_sec: 0.3
     max_pause_sec: 1.0
     allow_silence_prob: 0.2
+    concat_without_noise_prob: 0.5
+    min_silence_for_direct_concat_sec: 2.5
+    short_noise_sec:
+      min: 0.3
+      max: 0.7
     fade_ms: 20
-    context_window_sec: 0.75
+    context_window_before_sec: 0.5
+    context_window_after_sec: 0.5
+    bandpass_filter:
+      enabled: true
+      low_hz: 100.0
+      high_hz: 8000.0
   time_stretch:
-    enable: false
+    enable: true
     min_ratio: 0.95
     max_ratio: 1.05
   noise_categories: []
 
 labelling:
   baseline_model_name: "openai/whisper-large-v3"
-  transition_token: "<SIL_TRANS>"
+  transition_token: "<SIL>"
   include_silence_token: true
   max_response_sec: 45.0
 

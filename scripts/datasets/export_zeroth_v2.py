@@ -16,6 +16,8 @@ import soundfile as sf
 from datasets import Audio, Dataset, load_dataset
 from tqdm import tqdm
 
+from src.modules.vad import compute_silence_stats
+
 
 LOGGER = logging.getLogger(__name__)
 SAMPLE_RATE = 16000
@@ -57,6 +59,19 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional limit on the number of samples per split.",
+    )
+    parser.add_argument(
+        "--vad-backend",
+        type=str,
+        default="silero",
+        choices=["silero", "energy"],
+        help="VAD backend to use when measuring leading/trailing silence.",
+    )
+    parser.add_argument(
+        "--vad-window",
+        type=float,
+        default=0.03,
+        help="Window size in seconds for VAD processing.",
     )
     return parser.parse_args()
 
@@ -106,6 +121,11 @@ class RawSampleRecord:
     dataset: str
     index: int
     source_id: str
+    leading_silence_sec: float
+    trailing_silence_sec: float
+    leading_silence_samples: int
+    trailing_silence_samples: int
+    vad_backend: str
 
     def to_json(self) -> Dict[str, object]:
         return {
@@ -121,6 +141,11 @@ class RawSampleRecord:
             "dataset": self.dataset,
             "index": self.index,
             "source_id": self.source_id,
+            "leading_silence_sec": round(self.leading_silence_sec, 3),
+            "trailing_silence_sec": round(self.trailing_silence_sec, 3),
+            "leading_silence_samples": self.leading_silence_samples,
+            "trailing_silence_samples": self.trailing_silence_samples,
+            "vad_backend": self.vad_backend,
         }
 
 
@@ -210,6 +235,8 @@ def export_samples_for_split(
     audio_root: Path,
     dataset_name: str,
     limit: int | None,
+    vad_backend: str,
+    vad_window_sec: float,
 ) -> List[RawSampleRecord]:
     records: List[RawSampleRecord] = []
 
@@ -261,6 +288,13 @@ def export_samples_for_split(
         channels = 1 if samples.ndim == 1 else samples.shape[1]
         duration_sec = float(len(samples) / sample_rate)
 
+        silence = compute_silence_stats(
+            samples,
+            sample_rate=sample_rate,
+            backend=vad_backend,
+            window_sec=vad_window_sec,
+        )
+
         filename = sanitize_component(source_id) + ".wav"
         audio_path = subdir / filename
         save_audio(samples, sample_rate, audio_path)
@@ -281,6 +315,11 @@ def export_samples_for_split(
             dataset=dataset_name,
             index=idx,
             source_id=source_id,
+            leading_silence_sec=silence.leading_sec,
+            trailing_silence_sec=silence.trailing_sec,
+            leading_silence_samples=silence.leading_samples,
+            trailing_silence_samples=silence.trailing_samples,
+            vad_backend=silence.backend,
         )
         records.append(record)
 
@@ -312,6 +351,8 @@ def main() -> None:
             audio_root=audio_root,
             dataset_name=args.dataset,
             limit=args.limit,
+            vad_backend=args.vad_backend,
+            vad_window_sec=args.vad_window,
         )
 
         raw_output = raw_dir / f"raw_samples_{split}.jsonl"

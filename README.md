@@ -102,7 +102,12 @@ python scripts/noise/preprocess_noise_resample.py \
   "sr_hz": 16000,
   "channels": 1,
   "dataset": "zeroth_korean_v2",
-  "index": 123
+  "index": 123,
+  "leading_silence_sec": 0.42,
+  "trailing_silence_sec": 0.37,
+  "leading_silence_samples": 6720,
+  "trailing_silence_samples": 5920,
+  "vad_backend": "silero"
 }
 ```
 - 새 추출 스크립트:
@@ -127,13 +132,14 @@ python scripts/noise/preprocess_noise_resample.py \
   ```
 - 입력: `data/zeroth_v2/raw_samples_<split>.jsonl`, 노이즈 카탈로그 & WAV
 - 처리:
-  - 동일 화자 발화를 길이 제한(<40초 등) 안에서 랜덤 샘플링하고, 필요 시 `time_stretch` 비율을 적용합니다.
-  - 발화 A → 전이 노이즈 → 발화 B 순서로 결합하고, pydub 기반 crossfade/smoothing, LUFS/True Peak 보정을 수행합니다.
-  - 노이즈 소스·슬라이스 위치·전이 시작/종료 시점·결합 후 총 길이·사용한 RNG 시드를 메타데이터로 기록합니다.
+  - Silero VAD(가능 시) 또는 에너지 기반 VAD로 각 발화의 앞/뒤 무음을 측정하고 JSONL에 기록합니다.
+  - 동일 화자 발화를 길이 제한(<40초 등) 안에서 랜덤 샘플링하고, 필요 시 전체 길이가 30초를 넘지 않도록 time-stretch(가속)합니다.
+  - 발화 A → (침묵/노이즈/직결) → 발화 B 순서로 결합하고, numpy 기반 crossfade·fade smoothing과 band-pass 기반 SNR 스케일링, LUFS/True Peak 정규화(-1 dBTP 클립 가드, TPDF dither)를 적용합니다.
+  - 무음이 충분할 경우 일정 확률로 노이즈 없이 그대로 이어붙이거나 짧은 노이즈만 삽입하며, 모든 결정과 구간 경계를 샘플 단위로 메타데이터에 기록합니다.
 - 출력:
   - WAV: `data/augmented_audio_v2/<split>/<pair_id>.wav`
   - 메타: `data/labels_v2/<split>/paired_meta.jsonl`
-    - `pair_id`, `speaker_id`, `source_samples`, `transition`, `noise`, `timings`(utterance A, noise, utterance B), `combined_text`, `status`, `error_msg`
+    - `pair_id`, `speaker_id`, `source_samples`, `segments.*.output_start/end_sample`, `transition`(무음/노이즈 판단, SNR, band-pass 설정), `text.combined_with_token`, `status`, `error_msg`
 - 실패 시: 길이 초과, 노이즈 미존재 등 사유를 기록하고 `status`를 `skip`/`error`로 설정합니다.
 - 구성 옵션과 메타 구조는 `docs/two_utterances_pipeline.md`에서 더 자세히 다룹니다.
 
@@ -164,29 +170,42 @@ selection:
   max_length_ratio: 3.0
   allow_cross_split: false
   rng_seed: 777
+  vad_backend: "silero"
+  vad_window_sec: 0.03
 
 synthesis:
   crossfade_sec: 0.1
   target_snr_db: 10.0
   loudness_target_lufs: -23.0
   true_peak_dbfs: -1.0
+  max_total_duration_after_stretch_sec: 30.0
   transition:
     min_noise_sec: 1.0
     max_noise_sec: 2.5
     min_pause_sec: 0.3
     max_pause_sec: 1.0
     allow_silence_prob: 0.2
+    concat_without_noise_prob: 0.5
+    min_silence_for_direct_concat_sec: 2.5
+    short_noise_sec:
+      min: 0.3
+      max: 0.7
     fade_ms: 20
-    context_window_sec: 0.75
+    context_window_before_sec: 0.5
+    context_window_after_sec: 0.5
+    bandpass_filter:
+      enabled: true
+      low_hz: 100.0
+      high_hz: 8000.0
   time_stretch:
-    enable: false
+    enable: true
     min_ratio: 0.95
     max_ratio: 1.05
   noise_categories: []
 
 labelling:
   baseline_model_name: "openai/whisper-large-v3"
-  transition_token: "<SIL_TRANS>"
+  transition_token: "<SIL>"
   include_silence_token: true
   max_response_sec: 45.0
 ```

@@ -50,6 +50,10 @@ def test_synthesize_split_creates_metadata_and_audio(tmp_path: Path, allow_silen
             "text": "안녕하세요.",
             "split": "train",
             "duration_sec": 1.0,
+            "leading_silence_sec": 0.1,
+            "trailing_silence_sec": 0.1,
+            "leading_silence_samples": int(0.1 * SAMPLE_RATE),
+            "trailing_silence_samples": int(0.1 * SAMPLE_RATE),
         },
         {
             "sample_id": "sample_b",
@@ -58,6 +62,10 @@ def test_synthesize_split_creates_metadata_and_audio(tmp_path: Path, allow_silen
             "text": "반갑습니다.",
             "split": "train",
             "duration_sec": 1.2,
+            "leading_silence_sec": 0.1,
+            "trailing_silence_sec": 0.05,
+            "leading_silence_samples": int(0.1 * SAMPLE_RATE),
+            "trailing_silence_samples": int(0.05 * SAMPLE_RATE),
         },
     ]
     with raw_samples_path.open("w", encoding="utf-8") as handle:
@@ -88,23 +96,35 @@ def test_synthesize_split_creates_metadata_and_audio(tmp_path: Path, allow_silen
             "max_total_duration_sec": 10.0,
             "max_length_ratio": 3.0,
             "rng_seed": 321,
+            "vad_backend": "energy",
+            "vad_window_sec": 0.03,
         },
         "synthesis": {
             "crossfade_sec": 0.05,
             "target_snr_db": 10.0,
             "loudness_target_lufs": -23.0,
             "true_peak_dbfs": -1.0,
+            "max_total_duration_after_stretch_sec": 5.0,
             "transition": {
                 "min_noise_sec": 1.0,
                 "max_noise_sec": 1.2,
                 "min_pause_sec": 0.1,
                 "max_pause_sec": 0.1,
                 "allow_silence_prob": allow_silence_prob,
+                "concat_without_noise_prob": 0.0,
+                "min_silence_for_direct_concat_sec": 3.0,
+                "short_noise_sec": {"min": 0.3, "max": 0.5},
                 "fade_ms": 15,
-                "context_window_sec": 0.2,
+                "context_window_before_sec": 0.2,
+                "context_window_after_sec": 0.2,
+                "bandpass_filter": {
+                    "enabled": True,
+                    "low_hz": 100.0,
+                    "high_hz": 8000.0,
+                },
             },
             "time_stretch": {
-                "enable": False,
+                "enable": True,
                 "min_ratio": 0.95,
                 "max_ratio": 1.05,
             },
@@ -112,7 +132,7 @@ def test_synthesize_split_creates_metadata_and_audio(tmp_path: Path, allow_silen
         },
         "labelling": {
             "baseline_model_name": "openai/whisper-large-v3",
-            "transition_token": "<SIL_TRANS>",
+            "transition_token": "<SIL>",
             "include_silence_token": True,
             "max_response_sec": 45.0,
         },
@@ -140,14 +160,15 @@ def test_synthesize_split_creates_metadata_and_audio(tmp_path: Path, allow_silen
     assert record["status"] == "ok"
     assert record["segments"]["utterance_a"]["sample_id"] == "sample_a"
     assert record["segments"]["utterance_b"]["sample_id"] == "sample_b"
-    assert "<SIL_TRANS>" in record["text"]["combined_with_token"]
+    assert "<SIL>" in record["text"]["combined_with_token"]
+    assert "duration_samples" in record["audio"]
+    assert "start_sample" in transition
+    assert "end_sample" in transition
 
     transition = record["segments"]["transition"]
-    if allow_silence_prob < 0.5:
-        assert transition["type"] == "noise"
+    assert transition["type"] in {"noise", "silence", "short_noise", "silence_passthrough"}
+    if transition["type"] == "noise":
         assert transition["noise"]["source_path"] is not None
-    else:
-        assert transition["type"] in {"noise", "silence"}
 
     augmented_root = Path(config["paths"]["augmented_audio_dir"]).resolve()
     output_audio = augmented_root / record["audio"]["output_path"]

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 import math
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
+from scipy import signal
 
 try:  # pragma: no cover - optional dependency
     import librosa
@@ -23,6 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 EPS = 1e-9
+TPDF_LSB = 1.0 / (2**15)
 
 
 @dataclass
@@ -88,6 +90,32 @@ class AudioProcessor:
     def compute_rms(self, samples: np.ndarray) -> float:
         return float(np.sqrt(np.mean(np.square(samples)) + EPS))
 
+    def remove_dc(self, samples: np.ndarray) -> np.ndarray:
+        if samples.size == 0:
+            return samples
+        return samples - float(np.mean(samples))
+
+    def bandpass_filter(self, samples: np.ndarray, low_hz: float, high_hz: float) -> np.ndarray:
+        if samples.size == 0:
+            return samples
+        nyquist = 0.5 * self.sample_rate
+        low = max(1e-3, low_hz) / nyquist
+        high = min(self.sample_rate / 2 - 1.0, high_hz) / nyquist
+        if not (0.0 < low < high < 1.0):
+            return samples
+        sos = signal.butter(4, [low, high], btype="bandpass", output="sos")
+        return signal.sosfilt(sos, samples).astype(np.float32, copy=False)
+
+    def prepare_snr_signal(self, samples: np.ndarray, bandpass_cfg: Optional[Dict[str, float]] = None) -> np.ndarray:
+        processed = self.remove_dc(samples.astype(np.float32, copy=False))
+        if bandpass_cfg and bandpass_cfg.get("enabled", True):
+            processed = self.bandpass_filter(
+                processed,
+                low_hz=float(bandpass_cfg.get("low_hz", 100.0)),
+                high_hz=float(bandpass_cfg.get("high_hz", 8000.0)),
+            )
+        return processed
+
     def integrated_loudness(self, samples: np.ndarray) -> float:
         if samples.size == 0:
             return float("-inf")
@@ -102,17 +130,33 @@ class AudioProcessor:
         peak = float(np.max(np.abs(samples)) + EPS)
         return 20.0 * np.log10(peak)
 
-    def match_snr(self, noise: np.ndarray, context: np.ndarray, target_snr_db: float) -> Tuple[np.ndarray, float]:
+    def true_peak_dbfs_oversampled(self, samples: np.ndarray, oversample: int = 4) -> float:
+        if samples.size == 0 or oversample <= 1:
+            return self.true_peak_dbfs(samples)
+        upsampled = signal.resample_poly(samples, oversample, 1)
+        peak = float(np.max(np.abs(upsampled)) + EPS)
+        return 20.0 * np.log10(peak)
+
+    def match_snr(
+        self,
+        noise: np.ndarray,
+        context: np.ndarray,
+        target_snr_db: float,
+        bandpass_cfg: Optional[Dict[str, float]] = None,
+    ) -> Tuple[np.ndarray, float]:
         """Scale ``noise`` to achieve ``target_snr_db`` relative to ``context`` RMS."""
 
-        context_rms = self.compute_rms(context)
-        noise_rms = self.compute_rms(noise)
+        processed_context = self.prepare_snr_signal(context, bandpass_cfg)
+        processed_noise = self.prepare_snr_signal(noise, bandpass_cfg)
+        context_rms = self.compute_rms(processed_context)
+        noise_rms = self.compute_rms(processed_noise)
         if noise_rms < EPS or context_rms < EPS:
             return noise, float("inf")
         desired_noise_rms = context_rms / (10 ** (target_snr_db / 20))
         scale = desired_noise_rms / noise_rms
         scaled = noise * scale
-        achieved = 20 * np.log10((context_rms + EPS) / (self.compute_rms(scaled) + EPS))
+        scaled_processed = processed_noise * scale
+        achieved = 20 * np.log10((context_rms + EPS) / (self.compute_rms(scaled_processed) + EPS))
         return scaled.astype(np.float32, copy=False), achieved
 
     def normalize_loudness(self, samples: np.ndarray) -> LoudnessReport:
@@ -121,13 +165,13 @@ class AudioProcessor:
         current_lufs = self.integrated_loudness(samples)
         gain_db = self.loudness_target_lufs - current_lufs if math.isfinite(current_lufs) else 0.0
         scaled = samples * (10 ** (gain_db / 20))
-        peak_dbfs = self.true_peak_dbfs(scaled)
+        peak_dbfs = self.true_peak_dbfs_oversampled(scaled)
         clip_guard = False
         if peak_dbfs > self.true_peak_limit_dbfs:
             clip_guard = True
             reduction_db = self.true_peak_limit_dbfs - peak_dbfs
             scaled = scaled * (10 ** (reduction_db / 20))
-            peak_dbfs = self.true_peak_dbfs(scaled)
+            peak_dbfs = self.true_peak_dbfs_oversampled(scaled)
 
         np.clip(scaled, -1.0, 1.0, out=scaled)
         final_lufs = self.integrated_loudness(scaled)
@@ -137,6 +181,13 @@ class AudioProcessor:
             true_peak_dbfs=peak_dbfs,
             clip_guard_applied=clip_guard,
         ), scaled.astype(np.float32, copy=False)
+
+    def apply_tpdf_dither(self, samples: np.ndarray, bit_depth: int = 16) -> np.ndarray:
+        if bit_depth <= 1:
+            return samples
+        lsb = 1.0 / (2 ** (bit_depth - 1))
+        dither = (np.random.rand(*samples.shape) - np.random.rand(*samples.shape)) * lsb
+        return (samples + dither).astype(np.float32, copy=False)
 
     # ---------------------------------------------------------------------
     # Crossfade / fade helpers
